@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ECHOES-Wildfire</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">ECHOES-Wildfire MVP</p>
+        <h1>Digital Memory Builder for Wildfire Events</h1>
+      </div>
+      <div class="status-pill" id="runStatus">Ready</div>
+    </header>
+
+    <section class="workspace">
+      <aside class="filters" aria-label="Search filters">
+        <label>
+          <span>Country</span>
+          <select id="country"></select>
+        </label>
+
+        <label>
+          <span>Region / municipality</span>
+          <select id="region"></select>
+        </label>
+
+        <div class="date-grid">
+          <label>
+            <span>Start date</span>
+            <input id="startDate" type="date" value="2024-07-01">
+          </label>
+          <label>
+            <span>End date</span>
+            <input id="endDate" type="date" value="2024-07-20">
+          </label>
+        </div>
+
+        <label>
+          <span>NASA FIRMS source</span>
+          <select id="source">
+            <option value="VIIRS_SNPP_NRT">VIIRS S-NPP NRT</option>
+            <option value="VIIRS_NOAA20_NRT">VIIRS NOAA-20 NRT</option>
+            <option value="VIIRS_NOAA21_NRT">VIIRS NOAA-21 NRT</option>
+            <option value="MODIS_NRT">MODIS NRT</option>
+            <option value="VIIRS_SNPP_SP">VIIRS S-NPP Standard</option>
+            <option value="MODIS_SP">MODIS Standard</option>
+          </select>
+        </label>
+
+        <label>
+          <span>NASA FIRMS map key</span>
+          <input id="nasaKey" type="password" placeholder="Paste key here">
+        </label>
+
+        <div class="inline-control">
+          <input id="demoMode" type="checkbox" checked>
+          <label for="demoMode">Use demo data if no API key is available</label>
+        </div>
+
+        <details>
+          <summary>Clustering settings</summary>
+          <label>
+            <span>Radius (km)</span>
+            <input id="radiusKm" type="number" min="1" max="100" value="12">
+          </label>
+          <label>
+            <span>Max time gap (hours)</span>
+            <input id="maxGapHours" type="number" min="1" max="168" value="36">
+          </label>
+        </details>
+
+        <button id="searchBtn" class="primary">Search Wildfire Events</button>
+
+        <div class="note">
+          NASA FIRMS detections are treated as active-fire evidence. Event status remains a prototype inference until confirmed by official or expert validation.
+        </div>
+      </aside>
+
+      <section class="results" aria-live="polite">
+        <div class="map-panel">
+          <canvas id="mapCanvas" width="980" height="420"></canvas>
+          <div class="map-legend">
+            <span><i class="dot high"></i> High confidence</span>
+            <span><i class="dot mid"></i> Medium</span>
+            <span><i class="dot low"></i> Low / possible</span>
+          </div>
+        </div>
+
+        <section class="summary-grid">
+          <div class="metric">
+            <span>Detections</span>
+            <strong id="detectionsMetric">0</strong>
+          </div>
+          <div class="metric">
+            <span>Event candidates</span>
+            <strong id="eventsMetric">0</strong>
+          </div>
+          <div class="metric">
+            <span>Source</span>
+            <strong id="sourceMetric">-</strong>
+          </div>
+        </section>
+
+        <section class="content-grid">
+          <div class="event-list">
+            <div class="section-head">
+              <h2>Wildfire Event Candidates</h2>
+              <span id="bboxLabel">No search yet</span>
+            </div>
+            <div id="eventsTable" class="events-empty">Run a search to discover candidate events.</div>
+          </div>
+
+          <aside class="memory-panel">
+            <div class="section-head">
+              <h2>Digital Memory Preview</h2>
+              <span id="selectedEventLabel">No event selected</span>
+            </div>
+            <div id="memoryPreview" class="memory-empty">
+              Select an event and build a first memory record. GDELT, Copernicus, OSM, and LLM analysis will attach here in the next module.
+            </div>
+          </aside>
+        </section>
+
+        <section class="provenance">
+          <h2>Data Provenance and Limitations</h2>
+          <div id="provenanceBody">No data loaded yet.</div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
