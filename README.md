@@ -14,6 +14,16 @@ Open:
 http://127.0.0.1:8787
 ```
 
+## Deploy on Streamlit Community Cloud
+
+Use this main file path:
+
+```text
+streamlit_app.py
+```
+
+The Streamlit version supports the same first MVP flow: country/region/date input, NASA FIRMS or demo detections, event candidate clustering, provenance, confidence scoring, and a first digital memory preview.
+
 ## Current Workflow
 
 1. Select a country, region, date range, and NASA FIRMS source.

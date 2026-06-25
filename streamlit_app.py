@@ -1,0 +1,307 @@
+from __future__ import annotations
+
+import csv
+import json
+import math
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import streamlit as st
+
+
+ROOT = Path(__file__).parent
+REGIONS_PATH = ROOT / "data" / "regions.json"
+NASA_FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{bbox}/{days}/{start}"
+MAX_FIRMS_DAYS_PER_CALL = 10
+
+
+@dataclass
+class Detection:
+    lat: float
+    lon: float
+    acquired_at: datetime
+    confidence_raw: str
+    confidence_score: float
+    frp: float
+    sensor: str
+    satellite: str
+
+
+@st.cache_data
+def load_regions() -> dict[str, Any]:
+    return json.loads(REGIONS_PATH.read_text(encoding="utf-8"))
+
+
+def to_float(value: str | None, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def confidence_to_score(value: str | None) -> float:
+    text = str(value or "").strip().lower()
+    if text in {"h", "high"}:
+        return 0.9
+    if text in {"n", "nominal", "medium"}:
+        return 0.65
+    if text in {"l", "low"}:
+        return 0.35
+    try:
+        numeric = float(text)
+    except ValueError:
+        return 0.5
+    return max(0.0, min(1.0, numeric / 100 if numeric > 1 else numeric))
+
+
+def haversine_km(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
+    radius = 6371.0
+    d_lat = math.radians(b_lat - a_lat)
+    d_lon = math.radians(b_lon - a_lon)
+    lat1 = math.radians(a_lat)
+    lat2 = math.radians(b_lat)
+    h = math.sin(d_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(d_lon / 2) ** 2
+    return 2 * radius * math.asin(math.sqrt(h))
+
+
+def parse_acquired(row: dict[str, str]) -> datetime:
+    day = row.get("acq_date", "")
+    time_text = row.get("acq_time", "0000").zfill(4)[:4]
+    return datetime.strptime(f"{day} {time_text}", "%Y-%m-%d %H%M")
+
+
+def parse_firms_csv(text: str, source: str) -> list[Detection]:
+    detections: list[Detection] = []
+    for row in csv.DictReader(text.splitlines()):
+        if not row.get("latitude") or not row.get("longitude"):
+            continue
+        detections.append(
+            Detection(
+                lat=to_float(row.get("latitude")),
+                lon=to_float(row.get("longitude")),
+                acquired_at=parse_acquired(row),
+                confidence_raw=row.get("confidence", ""),
+                confidence_score=confidence_to_score(row.get("confidence")),
+                frp=to_float(row.get("frp")),
+                sensor=row.get("instrument") or source,
+                satellite=row.get("satellite", ""),
+            )
+        )
+    return detections
+
+
+def date_chunks(start: date, end: date) -> list[tuple[date, int]]:
+    chunks = []
+    cursor = start
+    while cursor <= end:
+        days = min(MAX_FIRMS_DAYS_PER_CALL, (end - cursor).days + 1)
+        chunks.append((cursor, days))
+        cursor += timedelta(days=days)
+    return chunks
+
+
+def fetch_firms(key: str, source: str, bbox: list[float], start: date, end: date) -> list[Detection]:
+    detections: list[Detection] = []
+    bbox_text = ",".join(str(v) for v in bbox)
+    for chunk_start, days in date_chunks(start, end):
+        url = NASA_FIRMS_AREA_URL.format(
+            key=urllib.parse.quote(key),
+            source=urllib.parse.quote(source),
+            bbox=urllib.parse.quote(bbox_text),
+            days=days,
+            start=chunk_start.isoformat(),
+        )
+        with urllib.request.urlopen(url, timeout=30) as response:
+            detections.extend(parse_firms_csv(response.read().decode("utf-8", errors="replace"), source))
+    return detections
+
+
+def demo_detections(bbox: list[float], start: date) -> list[Detection]:
+    west, south, east, north = bbox
+    center_lat = (south + north) / 2
+    center_lon = (west + east) / 2
+    seeds = [
+        (center_lat + 0.04, center_lon - 0.05, 0, 14),
+        (center_lat + 0.06, center_lon - 0.02, 0, 19),
+        (center_lat + 0.01, center_lon + 0.03, 1, 11),
+        (center_lat - 0.14, center_lon + 0.11, 5, 9),
+        (center_lat - 0.12, center_lon + 0.15, 5, 17),
+        (center_lat - 0.17, center_lon + 0.08, 6, 8),
+        (center_lat + 0.22, center_lon + 0.18, 11, 12),
+    ]
+    detections = []
+    for idx, (lat, lon, day_offset, hour) in enumerate(seeds):
+        for j in range(4 + (idx % 3)):
+            detections.append(
+                Detection(
+                    lat=lat + j * 0.008,
+                    lon=lon + j * 0.007,
+                    acquired_at=datetime.combine(start + timedelta(days=day_offset), datetime.min.time())
+                    + timedelta(hours=hour, minutes=j * 11),
+                    confidence_raw="h" if idx % 2 == 0 else "n",
+                    confidence_score=0.88 if idx % 2 == 0 else 0.66,
+                    frp=38 + idx * 17 + j * 4,
+                    sensor="VIIRS demo",
+                    satellite="NPP",
+                )
+            )
+    return detections
+
+
+def cluster_events(detections: list[Detection], radius_km: float, max_gap_hours: float) -> list[dict[str, Any]]:
+    clusters: list[list[Detection]] = []
+    for detection in sorted(detections, key=lambda item: item.acquired_at):
+        best_index = None
+        best_distance = float("inf")
+        for idx, cluster in enumerate(clusters):
+            center_lat = sum(item.lat for item in cluster) / len(cluster)
+            center_lon = sum(item.lon for item in cluster) / len(cluster)
+            last_time = max(item.acquired_at for item in cluster)
+            distance = haversine_km(detection.lat, detection.lon, center_lat, center_lon)
+            gap_hours = abs((detection.acquired_at - last_time).total_seconds()) / 3600
+            if distance <= radius_km and gap_hours <= max_gap_hours and distance < best_distance:
+                best_index = idx
+                best_distance = distance
+        if best_index is None:
+            clusters.append([detection])
+        else:
+            clusters[best_index].append(detection)
+
+    events = []
+    for idx, cluster in enumerate(clusters, start=1):
+        center_lat = sum(item.lat for item in cluster) / len(cluster)
+        center_lon = sum(item.lon for item in cluster) / len(cluster)
+        max_frp = max(item.frp for item in cluster)
+        avg_conf = sum(item.confidence_score for item in cluster) / len(cluster)
+        detection_score = min(1.0, len(cluster) / 20)
+        frp_score = min(1.0, max_frp / 250)
+        event_confidence = round((avg_conf * 0.55 + detection_score * 0.25 + frp_score * 0.20) * 100)
+        if len(cluster) >= 8 and event_confidence >= 75:
+            status = "confirmed candidate"
+        elif len(cluster) >= 3 and event_confidence >= 55:
+            status = "probable candidate"
+        else:
+            status = "possible thermal anomaly"
+        events.append(
+            {
+                "event_id": f"WF-{idx:03d}",
+                "lat": round(center_lat, 5),
+                "lon": round(center_lon, 5),
+                "start": min(item.acquired_at for item in cluster).isoformat(timespec="minutes"),
+                "end": max(item.acquired_at for item in cluster).isoformat(timespec="minutes"),
+                "detections": len(cluster),
+                "max_frp": round(max_frp, 2),
+                "confidence_percent": event_confidence,
+                "status": status,
+            }
+        )
+    return sorted(events, key=lambda item: (item["confidence_percent"], item["detections"]), reverse=True)
+
+
+st.set_page_config(page_title="ECHOES-Wildfire", layout="wide")
+st.title("ECHOES-Wildfire")
+st.caption("AI-ready wildfire digital memory prototype using NASA FIRMS active-fire detections.")
+
+regions = load_regions()
+
+with st.sidebar:
+    st.header("Search")
+    country = st.selectbox("Country", list(regions.keys()), index=list(regions.keys()).index("Cyprus"))
+    region_names = list(regions[country]["regions"].keys())
+    default_region = region_names.index("Limassol") if country == "Cyprus" and "Limassol" in region_names else 0
+    region = st.selectbox("Region / municipality", region_names, index=default_region)
+    start_date = st.date_input("Start date", value=date(2024, 7, 1))
+    end_date = st.date_input("End date", value=date(2024, 7, 20))
+    source = st.selectbox("NASA FIRMS source", ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT", "MODIS_NRT"])
+    nasa_key = st.text_input("NASA FIRMS map key", type="password")
+    demo_mode = st.checkbox("Use demo data", value=True)
+    radius_km = st.slider("Cluster radius (km)", min_value=1, max_value=50, value=12)
+    max_gap_hours = st.slider("Max time gap (hours)", min_value=1, max_value=120, value=36)
+    run = st.button("Search Wildfire Events", type="primary")
+
+bbox = regions[country]["regions"][region]
+
+if not run:
+    st.info("Select a country, region, and date range, then run a search.")
+    st.stop()
+
+if end_date < start_date:
+    st.error("End date must be after start date.")
+    st.stop()
+
+with st.spinner("Building wildfire event candidates..."):
+    if demo_mode or not nasa_key:
+        detections = demo_detections(bbox, start_date)
+        source_label = "Demo data"
+        limitations = ["Demo mode uses synthetic detections for interface testing only."]
+    else:
+        detections = fetch_firms(nasa_key, source, bbox, start_date, end_date)
+        source_label = "NASA FIRMS"
+        limitations = [
+            "FIRMS reports active-fire and thermal-anomaly detections, not confirmed wildfire perimeters.",
+            "Hotspot clusters are event candidates and require official or expert validation.",
+        ]
+    events = cluster_events(detections, radius_km, max_gap_hours)
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Detections", len(detections))
+col2.metric("Event candidates", len(events))
+col3.metric("Source", source_label)
+
+if detections:
+    st.subheader("Detection Map")
+    st.map(pd.DataFrame([{"lat": d.lat, "lon": d.lon} for d in detections]), latitude="lat", longitude="lon")
+
+st.subheader("Wildfire Event Candidates")
+if not events:
+    st.warning("No candidate events found.")
+    st.stop()
+
+events_df = pd.DataFrame(events)
+st.dataframe(events_df, use_container_width=True, hide_index=True)
+
+selected_id = st.selectbox("Select event to build digital memory", events_df["event_id"].tolist())
+event = next(item for item in events if item["event_id"] == selected_id)
+
+memory_record = {
+    "memory_id": f"{country[:2].upper()}-{region.replace(' ', '-').upper()}-{event['event_id']}",
+    "event": {
+        "type": "wildfire",
+        "country": country,
+        "region": region,
+        "start": event["start"],
+        "end": event["end"],
+        "center": {"lat": event["lat"], "lon": event["lon"]},
+        "status": event["status"],
+    },
+    "satellite_evidence": {
+        "source": source_label,
+        "detections": event["detections"],
+        "max_frp": event["max_frp"],
+        "event_confidence_percent": event["confidence_percent"],
+        "evidence_type": "active-fire detections + spatio-temporal clustering",
+        "limitations": limitations,
+    },
+    "missing_data": [
+        "GDELT/news narratives are not attached yet.",
+        "Copernicus/EFFIS context is not attached yet.",
+        "Preparedness gaps and lessons learned require the next LLM/RAG module.",
+    ],
+}
+
+st.subheader("Digital Memory Preview")
+st.json(memory_record)
+
+with st.expander("Data provenance and confidence method", expanded=True):
+    st.write(f"Area: {country} / {region}")
+    st.write(f"Bounding box: {bbox}")
+    st.write("Confidence formula: 55% average FIRMS confidence + 25% detection count score + 20% max FRP score.")
+    for item in limitations:
+        st.write(f"- {item}")
