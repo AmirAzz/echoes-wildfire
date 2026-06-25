@@ -17,7 +17,16 @@ import streamlit as st
 ROOT = Path(__file__).parent
 REGIONS_PATH = ROOT / "data" / "regions.json"
 NASA_FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{bbox}/{days}/{start}"
+GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 MAX_FIRMS_DAYS_PER_CALL = 10
+WILDFIRE_TERMS = ["wildfire", "forest fire", "bushfire", "firefighters", "evacuation", "burned area", "smoke"]
+IMPACT_KEYWORDS = {
+    "evacuation": ["evacuat", "shelter"],
+    "road disruption": ["road", "highway", "traffic", "closure"],
+    "property damage": ["home", "house", "property", "village", "damage"],
+    "smoke exposure": ["smoke", "air quality", "respiratory"],
+    "firefighting deployment": ["firefighter", "aircraft", "helicopter", "water bomber", "civil protection"],
+}
 
 
 @dataclass
@@ -123,6 +132,107 @@ def fetch_firms(key: str, source: str, bbox: list[float], start: date, end: date
     return detections
 
 
+def gdelt_datetime(value: datetime) -> str:
+    return value.strftime("%Y%m%d%H%M%S")
+
+
+def event_date_window(event: dict[str, Any], padding_days: int = 2) -> tuple[datetime, datetime]:
+    start = datetime.fromisoformat(event["start"]) - timedelta(days=padding_days)
+    end = datetime.fromisoformat(event["end"]) + timedelta(days=padding_days)
+    return start, end
+
+
+def article_relevance(article: dict[str, Any], country: str, region: str) -> float:
+    text = f"{article.get('title', '')} {article.get('domain', '')}".lower()
+    score = 0.25
+    if country.lower() in text:
+        score += 0.18
+    if region.lower() in text:
+        score += 0.25
+    score += min(0.35, sum(0.08 for term in WILDFIRE_TERMS if term in text))
+    return round(min(score, 1.0), 2)
+
+
+@st.cache_data(ttl=1800)
+def fetch_gdelt_articles(country: str, region: str, start: datetime, end: datetime, max_records: int) -> list[dict[str, Any]]:
+    query = f'("{region}" OR "{country}") ("wildfire" OR "forest fire" OR "firefighters" OR "evacuation")'
+    params = {
+        "query": query,
+        "mode": "ArtList",
+        "format": "json",
+        "maxrecords": str(max_records),
+        "sort": "HybridRel",
+        "startdatetime": gdelt_datetime(start),
+        "enddatetime": gdelt_datetime(end),
+    }
+    url = f"{GDELT_DOC_URL}?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(url, headers={"User-Agent": "ECHOES-Wildfire/0.1"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+
+    articles = []
+    seen_urls = set()
+    for item in payload.get("articles", []):
+        article_url = item.get("url", "")
+        if not article_url or article_url in seen_urls:
+            continue
+        seen_urls.add(article_url)
+        article = {
+            "title": item.get("title", "Untitled"),
+            "url": article_url,
+            "domain": item.get("domain", ""),
+            "language": item.get("language", ""),
+            "source_country": item.get("sourceCountry", ""),
+            "seen_date": item.get("seendate", ""),
+        }
+        article["relevance"] = article_relevance(article, country, region)
+        articles.append(article)
+
+    return sorted(articles, key=lambda row: row["relevance"], reverse=True)
+
+
+def build_public_narrative(articles: list[dict[str, Any]]) -> dict[str, Any]:
+    if not articles:
+        return {
+            "source": "GDELT Doc API",
+            "articles_found": 0,
+            "confidence": 0.0,
+            "status": "no public narrative evidence found",
+            "limitations": [
+                "No GDELT articles were found for the selected event window and query.",
+                "Absence of media evidence does not mean absence of a wildfire event.",
+            ],
+        }
+
+    titles = [article["title"] for article in articles]
+    title_text = " ".join(titles).lower()
+    reported_impacts = [
+        label
+        for label, keywords in IMPACT_KEYWORDS.items()
+        if any(keyword in title_text for keyword in keywords)
+    ]
+    domains = sorted({article["domain"] for article in articles if article["domain"]})
+    confidence = min(0.9, 0.35 + len(articles) * 0.04 + len(domains) * 0.025)
+    confidence = round(confidence, 2)
+    top_titles = titles[:5]
+
+    return {
+        "source": "GDELT Doc API",
+        "articles_found": len(articles),
+        "distinct_domains": len(domains),
+        "top_sources": domains[:8],
+        "reported_impacts_preliminary": reported_impacts,
+        "summary": "Public reporting was found for this event window. The current summary is rule-based and uses article titles only; the next LLM/RAG module should extract claims with citations from article text.",
+        "top_article_titles": top_titles,
+        "confidence": confidence,
+        "limitations": [
+            "GDELT is a public media index and may miss local or non-indexed sources.",
+            "Current extraction is title-based and should not be treated as verified impact assessment.",
+            "Duplicate syndication and uneven media attention can bias event visibility.",
+        ],
+    }
+
+
 def demo_detections(bbox: list[float], start: date) -> list[Detection]:
     west, south, east, north = bbox
     center_lat = (south + north) / 2
@@ -222,6 +332,8 @@ with st.sidebar:
     source = st.selectbox("NASA FIRMS source", ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT", "MODIS_NRT"])
     nasa_key = st.text_input("NASA FIRMS map key", type="password")
     demo_mode = st.checkbox("Use demo data", value=True)
+    attach_gdelt = st.checkbox("Attach GDELT/news evidence", value=True)
+    gdelt_max_records = st.slider("Max GDELT articles", min_value=5, max_value=50, value=20)
     radius_km = st.slider("Cluster radius (km)", min_value=1, max_value=50, value=12)
     max_gap_hours = st.slider("Max time gap (hours)", min_value=1, max_value=120, value=36)
     run = st.button("Search Wildfire Events", type="primary")
@@ -270,6 +382,45 @@ st.dataframe(events_df, use_container_width=True, hide_index=True)
 selected_id = st.selectbox("Select event to build digital memory", events_df["event_id"].tolist())
 event = next(item for item in events if item["event_id"] == selected_id)
 
+articles: list[dict[str, Any]] = []
+gdelt_error = ""
+if attach_gdelt:
+    gdelt_start, gdelt_end = event_date_window(event)
+    with st.spinner("Collecting GDELT/news evidence for the selected event..."):
+        try:
+            articles = fetch_gdelt_articles(country, region, gdelt_start, gdelt_end, gdelt_max_records)
+        except Exception as exc:  # Streamlit should keep the memory record even if GDELT is temporarily unavailable.
+            gdelt_error = str(exc)
+
+public_narrative = build_public_narrative(articles)
+if gdelt_error:
+    public_narrative["status"] = "GDELT retrieval failed"
+    public_narrative["retrieval_error"] = gdelt_error
+    public_narrative["limitations"] = public_narrative.get("limitations", []) + [
+        "GDELT could not be reached or returned an error during this run."
+    ]
+
+if attach_gdelt:
+    st.subheader("GDELT / News Evidence")
+    if articles:
+        articles_df = pd.DataFrame(articles)
+        st.dataframe(
+            articles_df[["relevance", "seen_date", "domain", "language", "source_country", "title", "url"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+    elif gdelt_error:
+        st.warning(f"GDELT retrieval failed: {gdelt_error}")
+    else:
+        st.info("No GDELT articles found for this event window and query.")
+
+missing_data = [
+    "Copernicus/EFFIS context is not attached yet.",
+    "Preparedness gaps and lessons learned require the next LLM/RAG module.",
+]
+if not articles:
+    missing_data.insert(0, "No GDELT/news narrative evidence is currently attached.")
+
 memory_record = {
     "memory_id": f"{country[:2].upper()}-{region.replace(' ', '-').upper()}-{event['event_id']}",
     "event": {
@@ -289,11 +440,14 @@ memory_record = {
         "evidence_type": "active-fire detections + spatio-temporal clustering",
         "limitations": limitations,
     },
-    "missing_data": [
-        "GDELT/news narratives are not attached yet.",
-        "Copernicus/EFFIS context is not attached yet.",
-        "Preparedness gaps and lessons learned require the next LLM/RAG module.",
-    ],
+    "public_narrative": public_narrative,
+    "evidence_sources": {
+        "satellite": source_label,
+        "public_news": "GDELT Doc API" if attach_gdelt else "not requested",
+        "official_context": "pending Copernicus/EFFIS connector",
+        "llm_analysis": "pending RAG/LLM module",
+    },
+    "missing_data": missing_data,
 }
 
 st.subheader("Digital Memory Preview")
