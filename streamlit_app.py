@@ -315,6 +315,42 @@ def build_public_narrative(articles: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def demo_news_fallback(country: str, area_name: str, event: dict[str, Any]) -> list[dict[str, Any]]:
+    event_day = event["start"][:10]
+    return [
+        {
+            "title": f"Demo fallback: wildfire reported near {area_name} with firefighting response",
+            "url": "demo://gdelt-rate-limit/fallback-1",
+            "domain": "demo-fallback.local",
+            "language": "English",
+            "source_country": country,
+            "seen_date": event_day,
+            "relevance": 0.75,
+            "is_demo_fallback": True,
+        },
+        {
+            "title": f"Demo fallback: local authorities monitor smoke, road access, and vulnerable communities in {area_name}",
+            "url": "demo://gdelt-rate-limit/fallback-2",
+            "domain": "demo-fallback.local",
+            "language": "English",
+            "source_country": country,
+            "seen_date": event_day,
+            "relevance": 0.68,
+            "is_demo_fallback": True,
+        },
+        {
+            "title": f"Demo fallback: preparedness lessons include early warning, evacuation communication, and resource coordination",
+            "url": "demo://gdelt-rate-limit/fallback-3",
+            "domain": "demo-fallback.local",
+            "language": "English",
+            "source_country": country,
+            "seen_date": event_day,
+            "relevance": 0.62,
+            "is_demo_fallback": True,
+        },
+    ]
+
+
 def demo_detections(bbox: list[float], start: date) -> list[Detection]:
     west, south, east, north = bbox
     center_lat = (south + north) / 2
@@ -433,6 +469,11 @@ with st.sidebar:
     )
     attach_gdelt = st.checkbox("Enable GDELT/news evidence", value=False)
     gdelt_max_records = st.slider("Max GDELT articles", min_value=5, max_value=50, value=10)
+    use_news_fallback = st.checkbox(
+        "Use demo news fallback if GDELT is rate-limited",
+        value=True,
+        help="Fallback rows are clearly marked as demo data and are only for presentation continuity.",
+    )
     radius_km = st.slider("Cluster radius (km)", min_value=1, max_value=50, value=12)
     max_gap_hours = st.slider("Max time gap (hours)", min_value=1, max_value=120, value=36)
     run = st.button("Search Wildfire Events", type="primary")
@@ -553,13 +594,22 @@ if attach_gdelt:
                 fetched_articles = fetch_gdelt_articles(country, area_name, gdelt_start, gdelt_end, gdelt_max_records)
                 st.session_state.gdelt_results[gdelt_cache_key] = {"articles": fetched_articles, "error": ""}
             except Exception as exc:  # Keep the memory record even if GDELT is temporarily unavailable.
-                st.session_state.gdelt_results[gdelt_cache_key] = {"articles": [], "error": str(exc)}
+                fallback_articles = demo_news_fallback(country, area_name, event) if use_news_fallback else []
+                st.session_state.gdelt_results[gdelt_cache_key] = {"articles": fallback_articles, "error": str(exc)}
 
     cached_gdelt = st.session_state.gdelt_results.get(gdelt_cache_key, {"articles": [], "error": ""})
     articles = cached_gdelt["articles"]
     gdelt_error = cached_gdelt["error"]
 
 public_narrative = build_public_narrative(articles)
+if articles and any(article.get("is_demo_fallback") for article in articles):
+    public_narrative["source"] = "Demo news fallback after GDELT retrieval failure"
+    public_narrative["is_demo_fallback"] = True
+    public_narrative["confidence"] = min(public_narrative.get("confidence", 0.0), 0.35)
+    public_narrative["limitations"] = public_narrative.get("limitations", []) + [
+        "These fallback rows are not real news articles and must not be cited as external evidence.",
+        "Use them only to demonstrate the Digital Memory structure when GDELT is rate-limited.",
+    ]
 if gdelt_error:
     public_narrative["status"] = "GDELT retrieval failed"
     public_narrative["retrieval_error"] = gdelt_error
@@ -570,11 +620,15 @@ if gdelt_error:
 if attach_gdelt:
     if articles:
         articles_df = pd.DataFrame(articles)
+        if "is_demo_fallback" not in articles_df:
+            articles_df["is_demo_fallback"] = False
         st.dataframe(
-            articles_df[["relevance", "seen_date", "domain", "language", "source_country", "title", "url"]],
+            articles_df[["relevance", "seen_date", "domain", "language", "source_country", "is_demo_fallback", "title", "url"]],
             use_container_width=True,
             hide_index=True,
         )
+        if any(article.get("is_demo_fallback") for article in articles):
+            st.warning("Showing demo fallback rows because GDELT was rate-limited. These are not real news articles.")
     elif gdelt_error:
         st.warning(f"GDELT retrieval failed: {gdelt_error}")
     else:

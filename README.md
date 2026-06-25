@@ -44,6 +44,8 @@ NASA_FIRMS_MAP_KEY = "your_firms_map_key_here"
 
 Note: GDELT can rate-limit public cloud apps with HTTP 429. The Streamlit UI therefore fetches GDELT only after pressing the dedicated fetch button.
 
+If GDELT is rate-limited, the app can optionally show clearly marked demo fallback news rows. These rows are not real articles and must not be cited as external evidence.
+
 Note: preset regions are examples only. Use `Custom city/area` for any city or municipality not listed. The app geocodes custom areas with OpenStreetMap Nominatim.
 
 Note: demo mode uses synthetic sample detections and intentionally returns a small fixed set of event candidates. Turn off demo mode to query real NASA FIRMS detections from the key stored in Streamlit secrets.
