@@ -48,6 +48,8 @@ Note: preset regions are examples only. Use `Custom city/area` for any city or m
 
 Note: demo mode uses synthetic sample detections and intentionally returns a small fixed set of event candidates. Turn off demo mode to query real NASA FIRMS detections from the key stored in Streamlit secrets.
 
+Note: NASA FIRMS Area API accepts a day range of 1-5 days per request, so longer date windows are split into 5-day chunks.
+
 ## Next Modules
 
 - Copernicus/EFFIS context connector.

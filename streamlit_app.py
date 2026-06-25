@@ -20,7 +20,7 @@ REGIONS_PATH = ROOT / "data" / "regions.json"
 NASA_FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{bbox}/{days}/{start}"
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-MAX_FIRMS_DAYS_PER_CALL = 10
+MAX_FIRMS_DAYS_PER_CALL = 5
 WILDFIRE_TERMS = ["wildfire", "forest fire", "bushfire", "firefighters", "evacuation", "burned area", "smoke"]
 IMPACT_KEYWORDS = {
     "evacuation": ["evacuat", "shelter"],
@@ -143,6 +143,11 @@ def fetch_firms(key: str, source: str, bbox: list[float], start: date, end: date
                 ) from exc
             if exc.code == 429:
                 raise RuntimeError("NASA FIRMS rate limit reached. Wait a few minutes and search again.") from exc
+            if exc.code == 400:
+                raise RuntimeError(
+                    "NASA FIRMS rejected the request as invalid. The app now splits requests into 5-day chunks; "
+                    "if this persists, check the date range, selected source, and bounding box."
+                ) from exc
             raise RuntimeError(f"NASA FIRMS returned HTTP {exc.code}. Try demo mode or check the selected source/date range.") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Could not reach NASA FIRMS: {exc.reason}") from exc
