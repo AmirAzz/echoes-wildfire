@@ -21,6 +21,20 @@ NASA_FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 MAX_FIRMS_DAYS_PER_CALL = 5
+FIRMS_SOURCES = [
+    "VIIRS_SNPP_SP",
+    "VIIRS_NOAA20_SP",
+    "MODIS_SP",
+    "VIIRS_SNPP_NRT",
+    "VIIRS_NOAA20_NRT",
+    "VIIRS_NOAA21_NRT",
+    "MODIS_NRT",
+]
+HISTORICAL_SOURCE_MAP = {
+    "VIIRS_SNPP_NRT": "VIIRS_SNPP_SP",
+    "VIIRS_NOAA20_NRT": "VIIRS_NOAA20_SP",
+    "MODIS_NRT": "MODIS_SP",
+}
 WILDFIRE_TERMS = ["wildfire", "forest fire", "bushfire", "firefighters", "evacuation", "burned area", "smoke"]
 IMPACT_KEYWORDS = {
     "evacuation": ["evacuat", "shelter"],
@@ -118,14 +132,21 @@ def date_chunks(start: date, end: date) -> list[tuple[date, int]]:
     return chunks
 
 
+def effective_firms_source(source: str, end: date) -> tuple[str, str | None]:
+    if source in HISTORICAL_SOURCE_MAP and end < (date.today() - timedelta(days=30)):
+        historical_source = HISTORICAL_SOURCE_MAP[source]
+        return historical_source, f"Historical date range detected; using {historical_source} instead of {source}."
+    return source, None
+
+
 def fetch_firms(key: str, source: str, bbox: list[float], start: date, end: date) -> list[Detection]:
     detections: list[Detection] = []
     bbox_text = ",".join(str(v) for v in bbox)
     for chunk_start, days in date_chunks(start, end):
         url = NASA_FIRMS_AREA_URL.format(
-            key=urllib.parse.quote(key),
+            key=urllib.parse.quote(key.strip()),
             source=urllib.parse.quote(source),
-            bbox=urllib.parse.quote(bbox_text),
+            bbox=bbox_text,
             days=days,
             start=chunk_start.isoformat(),
         )
@@ -395,7 +416,11 @@ with st.sidebar:
     )
     start_date = st.date_input("Start date", value=date(2024, 7, 1))
     end_date = st.date_input("End date", value=date(2024, 7, 20))
-    source = st.selectbox("NASA FIRMS source", ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT", "MODIS_NRT"])
+    source = st.selectbox(
+        "NASA FIRMS source",
+        FIRMS_SOURCES,
+        help="Use SP for historical dates and NRT for recent near-real-time detections.",
+    )
     nasa_key = get_nasa_firms_key()
     if nasa_key:
         st.success("NASA FIRMS key loaded from Streamlit secrets.")
@@ -448,13 +473,16 @@ with st.spinner("Building wildfire event candidates..."):
         st.error("NASA FIRMS key is missing. Add NASA_FIRMS_MAP_KEY in Streamlit app secrets or enable demo mode.")
         st.stop()
     else:
+        source_to_query, source_note = effective_firms_source(source, end_date)
+        if source_note:
+            st.info(source_note)
         try:
-            detections = fetch_firms(nasa_key, source, bbox, start_date, end_date)
+            detections = fetch_firms(nasa_key, source_to_query, bbox, start_date, end_date)
         except Exception as exc:
             st.error(str(exc))
             st.info("You can enable demo mode to continue testing the interface while the NASA FIRMS request is fixed.")
             st.stop()
-        source_label = "NASA FIRMS"
+        source_label = f"NASA FIRMS ({source_to_query})"
         limitations = [
             "FIRMS reports active-fire and thermal-anomaly detections, not confirmed wildfire perimeters.",
             "Hotspot clusters are event candidates and require official or expert validation.",

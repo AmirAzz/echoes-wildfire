@@ -50,6 +50,8 @@ Note: demo mode uses synthetic sample detections and intentionally returns a sma
 
 Note: NASA FIRMS Area API accepts a day range of 1-5 days per request, so longer date windows are split into 5-day chunks.
 
+Note: use `SP` products for historical dates and `NRT` products for recent near-real-time detections. The app automatically maps common NRT sources to SP for date ranges older than 30 days.
+
 ## Next Modules
 
 - Copernicus/EFFIS context connector.
