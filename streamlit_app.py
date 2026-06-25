@@ -451,7 +451,10 @@ except Exception as exc:
     st.error(f"Could not resolve the selected area: {exc}")
     st.stop()
 
-if not run:
+if "search_results" not in st.session_state:
+    st.session_state.search_results = None
+
+if not run and st.session_state.search_results is None:
     st.info("Select a country, region, and date range, then run a search.")
     st.stop()
 
@@ -459,35 +462,60 @@ if end_date < start_date:
     st.error("End date must be after start date.")
     st.stop()
 
-with st.spinner("Building wildfire event candidates..."):
-    if demo_mode:
-        detections = demo_detections(bbox, start_date)
-        source_label = "Demo data"
-        limitations = [
-            "Demo mode uses synthetic detections for interface testing only.",
-            "Demo mode intentionally returns a small fixed sample of event candidates for every selected area.",
-            "Turn off demo mode to query real NASA FIRMS detections using the Streamlit secret key.",
-        ]
-        st.warning("Demo mode is on: event candidates are synthetic and will look similar across locations.")
-    elif not nasa_key:
-        st.error("NASA FIRMS key is missing. Add NASA_FIRMS_MAP_KEY in Streamlit app secrets or enable demo mode.")
-        st.stop()
-    else:
-        source_to_query, source_note = effective_firms_source(source, end_date)
-        if source_note:
-            st.info(source_note)
-        try:
-            detections = fetch_firms(nasa_key, source_to_query, bbox, start_date, end_date)
-        except Exception as exc:
-            st.error(str(exc))
-            st.info("You can enable demo mode to continue testing the interface while the NASA FIRMS request is fixed.")
+if run:
+    with st.spinner("Building wildfire event candidates..."):
+        if demo_mode:
+            detections = demo_detections(bbox, start_date)
+            source_label = "Demo data"
+            limitations = [
+                "Demo mode uses synthetic detections for interface testing only.",
+                "Demo mode intentionally returns a small fixed sample of event candidates for every selected area.",
+                "Turn off demo mode to query real NASA FIRMS detections using the Streamlit secret key.",
+            ]
+            st.warning("Demo mode is on: event candidates are synthetic and will look similar across locations.")
+        elif not nasa_key:
+            st.error("NASA FIRMS key is missing. Add NASA_FIRMS_MAP_KEY in Streamlit app secrets or enable demo mode.")
             st.stop()
-        source_label = f"NASA FIRMS ({source_to_query})"
-        limitations = [
-            "FIRMS reports active-fire and thermal-anomaly detections, not confirmed wildfire perimeters.",
-            "Hotspot clusters are event candidates and require official or expert validation.",
-        ]
-    events = cluster_events(detections, radius_km, max_gap_hours)
+        else:
+            source_to_query, source_note = effective_firms_source(source, end_date)
+            if source_note:
+                st.info(source_note)
+            try:
+                detections = fetch_firms(nasa_key, source_to_query, bbox, start_date, end_date)
+            except Exception as exc:
+                st.error(str(exc))
+                st.info("You can enable demo mode to continue testing the interface while the NASA FIRMS request is fixed.")
+                st.stop()
+            source_label = f"NASA FIRMS ({source_to_query})"
+            limitations = [
+                "FIRMS reports active-fire and thermal-anomaly detections, not confirmed wildfire perimeters.",
+                "Hotspot clusters are event candidates and require official or expert validation.",
+            ]
+        events = cluster_events(detections, radius_km, max_gap_hours)
+        st.session_state.search_results = {
+            "detections": detections,
+            "events": events,
+            "source_label": source_label,
+            "limitations": limitations,
+            "country": country,
+            "area_name": area_name,
+            "area_label": area_label,
+            "bbox": bbox,
+        }
+        st.session_state.gdelt_results = {}
+
+search_results = st.session_state.search_results
+detections = search_results["detections"]
+events = search_results["events"]
+source_label = search_results["source_label"]
+limitations = search_results["limitations"]
+country = search_results["country"]
+area_name = search_results["area_name"]
+area_label = search_results["area_label"]
+bbox = search_results["bbox"]
+
+if not run:
+    st.caption(f"Showing last search results for {area_label}. Press Search Wildfire Events to update the results.")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Detections", len(detections))
