@@ -133,6 +133,13 @@ def fetch_firms(key: str, source: str, bbox: list[float], start: date, end: date
     return detections
 
 
+def get_nasa_firms_key() -> str:
+    try:
+        return str(st.secrets.get("NASA_FIRMS_MAP_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
 def gdelt_datetime(value: datetime) -> str:
     return value.strftime("%Y%m%d%H%M%S")
 
@@ -338,7 +345,11 @@ with st.sidebar:
     start_date = st.date_input("Start date", value=date(2024, 7, 1))
     end_date = st.date_input("End date", value=date(2024, 7, 20))
     source = st.selectbox("NASA FIRMS source", ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT", "MODIS_NRT"])
-    nasa_key = st.text_input("NASA FIRMS map key", type="password")
+    nasa_key = get_nasa_firms_key()
+    if nasa_key:
+        st.success("NASA FIRMS key loaded from Streamlit secrets.")
+    else:
+        st.info("No NASA FIRMS key found in Streamlit secrets. Demo mode is available.")
     demo_mode = st.checkbox("Use demo data", value=True)
     attach_gdelt = st.checkbox("Enable GDELT/news evidence", value=False)
     gdelt_max_records = st.slider("Max GDELT articles", min_value=5, max_value=50, value=10)
@@ -357,10 +368,13 @@ if end_date < start_date:
     st.stop()
 
 with st.spinner("Building wildfire event candidates..."):
-    if demo_mode or not nasa_key:
+    if demo_mode:
         detections = demo_detections(bbox, start_date)
         source_label = "Demo data"
         limitations = ["Demo mode uses synthetic detections for interface testing only."]
+    elif not nasa_key:
+        st.error("NASA FIRMS key is missing. Add NASA_FIRMS_MAP_KEY in Streamlit app secrets or enable demo mode.")
+        st.stop()
     else:
         detections = fetch_firms(nasa_key, source, bbox, start_date, end_date)
         source_label = "NASA FIRMS"

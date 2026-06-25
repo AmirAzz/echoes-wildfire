@@ -24,6 +24,12 @@ streamlit_app.py
 
 The Streamlit version supports the MVP flow: country/region/date input, NASA FIRMS or demo detections, event candidate clustering, GDELT/news evidence retrieval, provenance, confidence scoring, and a first digital memory preview.
 
+Add the NASA FIRMS key in Streamlit secrets, not in the public UI:
+
+```toml
+NASA_FIRMS_MAP_KEY = "your_firms_map_key_here"
+```
+
 ## Current Workflow
 
 1. Select a country, region, date range, and NASA FIRMS source.
