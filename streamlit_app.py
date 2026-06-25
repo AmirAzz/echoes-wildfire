@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -167,8 +168,15 @@ def fetch_gdelt_articles(country: str, region: str, start: datetime, end: dateti
     }
     url = f"{GDELT_DOC_URL}?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(url, headers={"User-Agent": "ECHOES-Wildfire/0.1"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise RuntimeError(
+                "GDELT rate limit reached (HTTP 429). Wait a few minutes, lower Max GDELT articles, then fetch again."
+            ) from exc
+        raise
 
     articles = []
     seen_urls = set()
@@ -332,8 +340,8 @@ with st.sidebar:
     source = st.selectbox("NASA FIRMS source", ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT", "MODIS_NRT"])
     nasa_key = st.text_input("NASA FIRMS map key", type="password")
     demo_mode = st.checkbox("Use demo data", value=True)
-    attach_gdelt = st.checkbox("Attach GDELT/news evidence", value=True)
-    gdelt_max_records = st.slider("Max GDELT articles", min_value=5, max_value=50, value=20)
+    attach_gdelt = st.checkbox("Enable GDELT/news evidence", value=False)
+    gdelt_max_records = st.slider("Max GDELT articles", min_value=5, max_value=50, value=10)
     radius_km = st.slider("Cluster radius (km)", min_value=1, max_value=50, value=12)
     max_gap_hours = st.slider("Max time gap (hours)", min_value=1, max_value=120, value=36)
     run = st.button("Search Wildfire Events", type="primary")
@@ -384,13 +392,25 @@ event = next(item for item in events if item["event_id"] == selected_id)
 
 articles: list[dict[str, Any]] = []
 gdelt_error = ""
+gdelt_cache_key = f"{country}|{region}|{selected_id}|{event['start']}|{event['end']}|{gdelt_max_records}"
+if "gdelt_results" not in st.session_state:
+    st.session_state.gdelt_results = {}
+
 if attach_gdelt:
-    gdelt_start, gdelt_end = event_date_window(event)
-    with st.spinner("Collecting GDELT/news evidence for the selected event..."):
-        try:
-            articles = fetch_gdelt_articles(country, region, gdelt_start, gdelt_end, gdelt_max_records)
-        except Exception as exc:  # Streamlit should keep the memory record even if GDELT is temporarily unavailable.
-            gdelt_error = str(exc)
+    st.subheader("GDELT / News Evidence")
+    st.caption("GDELT is fetched only when you press the button, reducing HTTP 429 rate-limit errors on Streamlit Cloud.")
+    if st.button("Fetch GDELT/news evidence for selected event"):
+        gdelt_start, gdelt_end = event_date_window(event)
+        with st.spinner("Collecting GDELT/news evidence for the selected event..."):
+            try:
+                fetched_articles = fetch_gdelt_articles(country, region, gdelt_start, gdelt_end, gdelt_max_records)
+                st.session_state.gdelt_results[gdelt_cache_key] = {"articles": fetched_articles, "error": ""}
+            except Exception as exc:  # Keep the memory record even if GDELT is temporarily unavailable.
+                st.session_state.gdelt_results[gdelt_cache_key] = {"articles": [], "error": str(exc)}
+
+    cached_gdelt = st.session_state.gdelt_results.get(gdelt_cache_key, {"articles": [], "error": ""})
+    articles = cached_gdelt["articles"]
+    gdelt_error = cached_gdelt["error"]
 
 public_narrative = build_public_narrative(articles)
 if gdelt_error:
@@ -401,7 +421,6 @@ if gdelt_error:
     ]
 
 if attach_gdelt:
-    st.subheader("GDELT / News Evidence")
     if articles:
         articles_df = pd.DataFrame(articles)
         st.dataframe(
@@ -412,7 +431,7 @@ if attach_gdelt:
     elif gdelt_error:
         st.warning(f"GDELT retrieval failed: {gdelt_error}")
     else:
-        st.info("No GDELT articles found for this event window and query.")
+        st.info("No GDELT articles attached yet. Press the fetch button above to collect news evidence.")
 
 missing_data = [
     "Copernicus/EFFIS context is not attached yet.",

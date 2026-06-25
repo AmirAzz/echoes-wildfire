@@ -31,8 +31,10 @@ The Streamlit version supports the MVP flow: country/region/date input, NASA FIR
 3. The backend fetches FIRMS hotspot CSV data or uses bundled mock detections.
 4. The event builder clusters nearby detections in space and time.
 5. The UI shows event candidates with confidence, provenance, limitations, and a map view.
-6. Select an event to retrieve GDELT/news evidence for the event window.
+6. Select an event and optionally fetch GDELT/news evidence for the event window.
 7. The digital memory preview combines satellite evidence with a preliminary public narrative.
+
+Note: GDELT can rate-limit public cloud apps with HTTP 429. The Streamlit UI therefore fetches GDELT only after pressing the dedicated fetch button.
 
 ## Next Modules
 
