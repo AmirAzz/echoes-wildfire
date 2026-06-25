@@ -19,6 +19,7 @@ ROOT = Path(__file__).parent
 REGIONS_PATH = ROOT / "data" / "regions.json"
 NASA_FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{bbox}/{days}/{start}"
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 MAX_FIRMS_DAYS_PER_CALL = 10
 WILDFIRE_TERMS = ["wildfire", "forest fire", "bushfire", "firefighters", "evacuation", "burned area", "smoke"]
 IMPACT_KEYWORDS = {
@@ -138,6 +139,31 @@ def get_nasa_firms_key() -> str:
         return str(st.secrets.get("NASA_FIRMS_MAP_KEY", "")).strip()
     except Exception:
         return ""
+
+
+@st.cache_data(ttl=86400)
+def geocode_area(area: str, country: str) -> dict[str, Any]:
+    query = f"{area}, {country}".strip(", ")
+    params = {
+        "q": query,
+        "format": "jsonv2",
+        "limit": "1",
+        "polygon_geojson": "0",
+    }
+    url = f"{NOMINATIM_URL}?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(url, headers={"User-Agent": "ECHOES-Wildfire/0.1"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    if not payload:
+        raise ValueError(f"Could not geocode area: {query}")
+    item = payload[0]
+    south, north, west, east = [float(value) for value in item["boundingbox"]]
+    return {
+        "label": item.get("display_name", query),
+        "bbox": [west, south, east, north],
+        "lat": float(item.get("lat", 0)),
+        "lon": float(item.get("lon", 0)),
+    }
 
 
 def gdelt_datetime(value: datetime) -> str:
@@ -341,7 +367,12 @@ with st.sidebar:
     country = st.selectbox("Country", list(regions.keys()), index=list(regions.keys()).index("Cyprus"))
     region_names = list(regions[country]["regions"].keys())
     default_region = region_names.index("Limassol") if country == "Cyprus" and "Limassol" in region_names else 0
-    region = st.selectbox("Region / municipality", region_names, index=default_region)
+    region = st.selectbox("Preset region / municipality", region_names, index=default_region)
+    custom_area = st.text_input(
+        "Custom city/area (optional)",
+        placeholder="e.g. Nicosia, Palermo, Athens, Valencia",
+        help="Use this when the city is not in the preset list. The app geocodes it with OpenStreetMap Nominatim.",
+    )
     start_date = st.date_input("Start date", value=date(2024, 7, 1))
     end_date = st.date_input("End date", value=date(2024, 7, 20))
     source = st.selectbox("NASA FIRMS source", ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT", "MODIS_NRT"])
@@ -350,14 +381,30 @@ with st.sidebar:
         st.success("NASA FIRMS key loaded from Streamlit secrets.")
     else:
         st.info("No NASA FIRMS key found in Streamlit secrets. Demo mode is available.")
-    demo_mode = st.checkbox("Use demo data", value=True)
+    demo_mode = st.checkbox(
+        "Use demo data",
+        value=not bool(nasa_key),
+        help="Demo data is synthetic and intentionally returns a small fixed set of sample events. Turn this off to query NASA FIRMS.",
+    )
     attach_gdelt = st.checkbox("Enable GDELT/news evidence", value=False)
     gdelt_max_records = st.slider("Max GDELT articles", min_value=5, max_value=50, value=10)
     radius_km = st.slider("Cluster radius (km)", min_value=1, max_value=50, value=12)
     max_gap_hours = st.slider("Max time gap (hours)", min_value=1, max_value=120, value=36)
     run = st.button("Search Wildfire Events", type="primary")
 
-bbox = regions[country]["regions"][region]
+area_name = custom_area.strip() if custom_area.strip() else region
+area_label = f"{country} / {area_name}"
+
+try:
+    if custom_area.strip():
+        geocoded_area = geocode_area(custom_area.strip(), country)
+        bbox = geocoded_area["bbox"]
+        area_label = geocoded_area["label"]
+    else:
+        bbox = regions[country]["regions"][region]
+except Exception as exc:
+    st.error(f"Could not resolve the selected area: {exc}")
+    st.stop()
 
 if not run:
     st.info("Select a country, region, and date range, then run a search.")
@@ -371,7 +418,12 @@ with st.spinner("Building wildfire event candidates..."):
     if demo_mode:
         detections = demo_detections(bbox, start_date)
         source_label = "Demo data"
-        limitations = ["Demo mode uses synthetic detections for interface testing only."]
+        limitations = [
+            "Demo mode uses synthetic detections for interface testing only.",
+            "Demo mode intentionally returns a small fixed sample of event candidates for every selected area.",
+            "Turn off demo mode to query real NASA FIRMS detections using the Streamlit secret key.",
+        ]
+        st.warning("Demo mode is on: event candidates are synthetic and will look similar across locations.")
     elif not nasa_key:
         st.error("NASA FIRMS key is missing. Add NASA_FIRMS_MAP_KEY in Streamlit app secrets or enable demo mode.")
         st.stop()
@@ -406,7 +458,7 @@ event = next(item for item in events if item["event_id"] == selected_id)
 
 articles: list[dict[str, Any]] = []
 gdelt_error = ""
-gdelt_cache_key = f"{country}|{region}|{selected_id}|{event['start']}|{event['end']}|{gdelt_max_records}"
+gdelt_cache_key = f"{country}|{area_name}|{selected_id}|{event['start']}|{event['end']}|{gdelt_max_records}"
 if "gdelt_results" not in st.session_state:
     st.session_state.gdelt_results = {}
 
@@ -417,7 +469,7 @@ if attach_gdelt:
         gdelt_start, gdelt_end = event_date_window(event)
         with st.spinner("Collecting GDELT/news evidence for the selected event..."):
             try:
-                fetched_articles = fetch_gdelt_articles(country, region, gdelt_start, gdelt_end, gdelt_max_records)
+                fetched_articles = fetch_gdelt_articles(country, area_name, gdelt_start, gdelt_end, gdelt_max_records)
                 st.session_state.gdelt_results[gdelt_cache_key] = {"articles": fetched_articles, "error": ""}
             except Exception as exc:  # Keep the memory record even if GDELT is temporarily unavailable.
                 st.session_state.gdelt_results[gdelt_cache_key] = {"articles": [], "error": str(exc)}
@@ -455,11 +507,12 @@ if not articles:
     missing_data.insert(0, "No GDELT/news narrative evidence is currently attached.")
 
 memory_record = {
-    "memory_id": f"{country[:2].upper()}-{region.replace(' ', '-').upper()}-{event['event_id']}",
+    "memory_id": f"{country[:2].upper()}-{area_name.replace(' ', '-').upper()}-{event['event_id']}",
     "event": {
         "type": "wildfire",
         "country": country,
-        "region": region,
+        "region": area_name,
+        "area_label": area_label,
         "start": event["start"],
         "end": event["end"],
         "center": {"lat": event["lat"], "lon": event["lon"]},
@@ -487,7 +540,7 @@ st.subheader("Digital Memory Preview")
 st.json(memory_record)
 
 with st.expander("Data provenance and confidence method", expanded=True):
-    st.write(f"Area: {country} / {region}")
+    st.write(f"Area: {area_label}")
     st.write(f"Bounding box: {bbox}")
     st.write("Confidence formula: 55% average FIRMS confidence + 25% detection count score + 20% max FRP score.")
     for item in limitations:

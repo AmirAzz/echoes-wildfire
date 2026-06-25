@@ -32,7 +32,7 @@ NASA_FIRMS_MAP_KEY = "your_firms_map_key_here"
 
 ## Current Workflow
 
-1. Select a country, region, date range, and NASA FIRMS source.
+1. Select a country and either a preset region or a custom city/area, plus date range and NASA FIRMS source.
 2. Enter a NASA FIRMS map key, or enable demo mode.
 3. The backend fetches FIRMS hotspot CSV data or uses bundled mock detections.
 4. The event builder clusters nearby detections in space and time.
@@ -41,6 +41,10 @@ NASA_FIRMS_MAP_KEY = "your_firms_map_key_here"
 7. The digital memory preview combines satellite evidence with a preliminary public narrative.
 
 Note: GDELT can rate-limit public cloud apps with HTTP 429. The Streamlit UI therefore fetches GDELT only after pressing the dedicated fetch button.
+
+Note: preset regions are examples only. Use `Custom city/area` for any city or municipality not listed. The app geocodes custom areas with OpenStreetMap Nominatim.
+
+Note: demo mode uses synthetic sample detections and intentionally returns a small fixed set of event candidates. Turn off demo mode to query real NASA FIRMS detections from the key stored in Streamlit secrets.
 
 ## Next Modules
 
