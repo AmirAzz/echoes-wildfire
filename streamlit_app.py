@@ -129,8 +129,23 @@ def fetch_firms(key: str, source: str, bbox: list[float], start: date, end: date
             days=days,
             start=chunk_start.isoformat(),
         )
-        with urllib.request.urlopen(url, timeout=30) as response:
-            detections.extend(parse_firms_csv(response.read().decode("utf-8", errors="replace"), source))
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                detections.extend(parse_firms_csv(response.read().decode("utf-8", errors="replace"), source))
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403}:
+                raise RuntimeError(
+                    "NASA FIRMS rejected the request. Check that the Streamlit secret key is valid and active."
+                ) from exc
+            if exc.code == 404:
+                raise RuntimeError(
+                    "NASA FIRMS endpoint or source was not found. Try another FIRMS source such as VIIRS_SNPP_NRT."
+                ) from exc
+            if exc.code == 429:
+                raise RuntimeError("NASA FIRMS rate limit reached. Wait a few minutes and search again.") from exc
+            raise RuntimeError(f"NASA FIRMS returned HTTP {exc.code}. Try demo mode or check the selected source/date range.") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Could not reach NASA FIRMS: {exc.reason}") from exc
     return detections
 
 
@@ -428,7 +443,12 @@ with st.spinner("Building wildfire event candidates..."):
         st.error("NASA FIRMS key is missing. Add NASA_FIRMS_MAP_KEY in Streamlit app secrets or enable demo mode.")
         st.stop()
     else:
-        detections = fetch_firms(nasa_key, source, bbox, start_date, end_date)
+        try:
+            detections = fetch_firms(nasa_key, source, bbox, start_date, end_date)
+        except Exception as exc:
+            st.error(str(exc))
+            st.info("You can enable demo mode to continue testing the interface while the NASA FIRMS request is fixed.")
+            st.stop()
         source_label = "NASA FIRMS"
         limitations = [
             "FIRMS reports active-fire and thermal-anomaly detections, not confirmed wildfire perimeters.",
