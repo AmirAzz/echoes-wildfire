@@ -136,7 +136,7 @@ def fetch_firms(key: str, source: str, bbox: list[float], start: date, end: date
 
 def get_nasa_firms_key() -> str:
     try:
-        return str(st.secrets.get("NASA_FIRMS_MAP_KEY", "")).strip()
+        return str(st.secrets.get("NASA_FIRMS_MAP_KEY", "") or st.secrets.get("FIRMS_MAP_KEY", "")).strip()
     except Exception:
         return ""
 

@@ -30,6 +30,8 @@ Add the NASA FIRMS key in Streamlit secrets, not in the public UI:
 NASA_FIRMS_MAP_KEY = "your_firms_map_key_here"
 ```
 
+`FIRMS_MAP_KEY` is also accepted as a backwards-compatible alias.
+
 ## Current Workflow
 
 1. Select a country and either a preset region or a custom city/area, plus date range and NASA FIRMS source.
