@@ -580,13 +580,19 @@ event = next(item for item in events if item["event_id"] == selected_id)
 
 articles: list[dict[str, Any]] = []
 gdelt_error = ""
-gdelt_cache_key = f"{country}|{area_name}|{selected_id}|{event['start']}|{event['end']}|{gdelt_max_records}"
+gdelt_cache_key = (
+    f"gdelt-v2|{country}|{area_name}|{selected_id}|{event['start']}|{event['end']}|"
+    f"{gdelt_max_records}|fallback={use_news_fallback}"
+)
 if "gdelt_results" not in st.session_state:
     st.session_state.gdelt_results = {}
 
 if attach_gdelt:
     st.subheader("GDELT / News Evidence")
     st.caption("GDELT is fetched only when you press the button, reducing HTTP 429 rate-limit errors on Streamlit Cloud.")
+    if st.button("Clear cached GDELT/news evidence"):
+        st.session_state.gdelt_results = {}
+        st.info("Cleared cached GDELT/news evidence for this session.")
     if st.button("Fetch GDELT/news evidence for selected event"):
         gdelt_start, gdelt_end = event_date_window(event)
         with st.spinner("Collecting GDELT/news evidence for the selected event..."):
@@ -600,6 +606,9 @@ if attach_gdelt:
     cached_gdelt = st.session_state.gdelt_results.get(gdelt_cache_key, {"articles": [], "error": ""})
     articles = cached_gdelt["articles"]
     gdelt_error = cached_gdelt["error"]
+    if gdelt_error and use_news_fallback and not articles:
+        articles = demo_news_fallback(country, area_name, event)
+        st.session_state.gdelt_results[gdelt_cache_key] = {"articles": articles, "error": gdelt_error}
 
 public_narrative = build_public_narrative(articles)
 if articles and any(article.get("is_demo_fallback") for article in articles):
@@ -611,7 +620,10 @@ if articles and any(article.get("is_demo_fallback") for article in articles):
         "Use them only to demonstrate the Digital Memory structure when GDELT is rate-limited.",
     ]
 if gdelt_error:
-    public_narrative["status"] = "GDELT retrieval failed"
+    if articles and any(article.get("is_demo_fallback") for article in articles):
+        public_narrative["status"] = "GDELT retrieval failed; demo fallback active"
+    else:
+        public_narrative["status"] = "GDELT retrieval failed"
     public_narrative["retrieval_error"] = gdelt_error
     public_narrative["limitations"] = public_narrative.get("limitations", []) + [
         "GDELT could not be reached or returned an error during this run."
