@@ -24,7 +24,8 @@ GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
-GEMINI_MODEL_FALLBACKS = ["gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]
+GEMINI_MODEL_FALLBACKS = ["gemini-3.5-flash", "gemini-3-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
+GEMINI_RETRYABLE_HTTP_CODES = {404, 429, 503}
 MAX_FIRMS_DAYS_PER_CALL = 5
 FIRMS_SOURCES = [
     "VIIRS_SNPP_SP",
@@ -640,7 +641,7 @@ def generate_gemini_memory_analysis(
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             last_error = f"Gemini model {candidate_model} returned HTTP {exc.code}. {detail}"
-            if exc.code != 404:
+            if exc.code not in GEMINI_RETRYABLE_HTTP_CODES:
                 raise RuntimeError(last_error) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Could not reach Gemini API: {exc.reason}") from exc
