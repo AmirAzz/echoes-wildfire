@@ -533,7 +533,7 @@ def render_insight_items(items: list[Any], empty_text: str) -> None:
             st.markdown(f"- {item}")
 
 
-def compact_articles_for_llm(articles: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:
+def compact_articles_for_llm(articles: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
     compacted = []
     for article in articles[:limit]:
         compacted.append(
@@ -596,7 +596,95 @@ def parse_json_response(text: str) -> dict[str, Any]:
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
             raise
-        return json.loads(text[start : end + 1])
+        json_text = text[start : end + 1]
+        try:
+            return json.loads(json_text)
+        except json.JSONDecodeError:
+            return json.loads(repair_json_string_newlines(json_text))
+
+
+def repair_json_string_newlines(text: str) -> str:
+    repaired = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if escaped:
+            repaired.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            repaired.append(char)
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            repaired.append(char)
+            continue
+        if in_string and char in {"\n", "\r", "\t"}:
+            repaired.append(" ")
+            continue
+        repaired.append(char)
+    return "".join(repaired)
+
+
+def gemini_response_schema() -> dict[str, Any]:
+    claim_item = {
+        "type": "object",
+        "properties": {
+            "claim": {"type": "string"},
+            "source_url": {"type": "string"},
+            "source_basis": {"type": "string"},
+            "confidence": {"type": "string"},
+            "requires_human_validation": {"type": "boolean"},
+        },
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "executive_summary": {"type": "string"},
+            "event_timeline": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "time": {"type": "string"},
+                        "claim": {"type": "string"},
+                        "source_basis": {"type": "string"},
+                        "confidence": {"type": "string"},
+                    },
+                },
+            },
+            "reported_impacts": {"type": "array", "items": claim_item},
+            "response_actions": {"type": "array", "items": claim_item},
+            "affected_or_vulnerable_groups": {"type": "array", "items": claim_item},
+            "preparedness_gaps": {"type": "array", "items": claim_item},
+            "lessons_learned": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "lesson": {"type": "string"},
+                        "source_basis": {"type": "string"},
+                        "confidence": {"type": "string"},
+                    },
+                },
+            },
+            "early_action_recommendations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "recommendation": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "confidence": {"type": "string"},
+                    },
+                },
+            },
+            "proposal_value": {"type": "string"},
+            "validation_needs": {"type": "array", "items": {"type": "string"}},
+            "overall_confidence": {"type": "string"},
+        },
+    }
 
 
 def generate_gemini_memory_analysis(
@@ -609,8 +697,9 @@ def generate_gemini_memory_analysis(
         "contents": [{"parts": [{"text": build_gemini_prompt(memory_record, articles)}]}],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 1800,
+            "maxOutputTokens": 3000,
             "responseMimeType": "application/json",
+            "responseSchema": gemini_response_schema(),
         },
     }
 
@@ -649,7 +738,15 @@ def generate_gemini_memory_analysis(
     if response_payload is None:
         raise RuntimeError(last_error or "Gemini did not return a usable response.")
 
-    analysis = parse_json_response(extract_gemini_text(response_payload))
+    response_text = extract_gemini_text(response_payload)
+    try:
+        analysis = parse_json_response(response_text)
+    except json.JSONDecodeError as exc:
+        preview = response_text[:220].replace("\n", " ")
+        raise RuntimeError(
+            "Gemini returned malformed JSON. Press Clear cached Gemini analysis and try again, "
+            f"or lower Max Google News RSS articles. Response preview: {preview}"
+        ) from exc
     analysis["method"] = "Gemini API structured generation over NASA FIRMS and public news metadata"
     analysis["model"] = selected_model
     analysis["important_limitation"] = (
