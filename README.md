@@ -46,7 +46,8 @@ GEMINI_API_KEY = "your_gemini_api_key_here"
 7. Optionally fetch readable article excerpts for the top news rows to strengthen claim extraction beyond titles and metadata.
 8. Generate Gemini memory analysis to extract reported impacts, response actions, vulnerable groups, preparedness gaps, lessons learned, early-action recommendations, and proposal value.
 9. Review the Gemini Memory Board with confidence bars, timeline, insight cards, and a validation checklist.
-10. The digital memory report combines satellite evidence, public narrative, article-excerpt evidence, Gemini insights, limitations, and the raw JSON record for export/debugging.
+10. Review the Preparedness Audit, which compares observed evidence with expected before/during/after actions and highlights critical gaps.
+11. The digital memory report combines satellite evidence, public narrative, article-excerpt evidence, Gemini insights, limitations, and the raw JSON record for export/debugging.
 
 Note: GDELT can rate-limit public cloud apps with HTTP 429. The Streamlit UI therefore fetches GDELT only after pressing the dedicated fetch button.
 

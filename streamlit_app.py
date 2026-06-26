@@ -812,6 +812,223 @@ def render_ai_timeline(items: list[dict[str, Any]]) -> None:
         )
 
 
+def action_texts(items: list[Any]) -> str:
+    return " ".join(insight_label(item) for item in items).lower()
+
+
+def audit_status(has_observed: bool, has_gap: bool) -> str:
+    if has_observed and not has_gap:
+        return "Met"
+    if has_observed and has_gap:
+        return "Partial"
+    return "Missing"
+
+
+def audit_score(statuses: list[str]) -> int:
+    if not statuses:
+        return 0
+    values = {"Met": 100, "Partial": 55, "Missing": 15}
+    return round(sum(values.get(status, 0) for status in statuses) / len(statuses))
+
+
+def build_preparedness_audit(memory_record: dict[str, Any]) -> dict[str, Any]:
+    llm = memory_record.get("llm_analysis", {})
+    event = memory_record["event"]
+    satellite = memory_record["satellite_evidence"]
+    narrative = memory_record["public_narrative"]
+    observed_actions = action_texts(llm.get("response_actions", []))
+    impacts = action_texts(llm.get("reported_impacts", []))
+    gaps = action_texts(llm.get("preparedness_gaps", []))
+    validation_needs = " ".join(llm.get("validation_needs", [])).lower()
+    has_articles = narrative.get("articles_found", 0) > 0
+    has_excerpts = narrative.get("article_texts_found", 0) > 0
+    has_event_specific_news = narrative.get("event_specific_articles", 0) > 0
+    has_fire_signal = satellite.get("detections", 0) >= 3 or satellite.get("event_confidence_percent", 0) >= 55
+
+    phases = [
+        {
+            "phase": "Before",
+            "score": 0,
+            "items": [
+                {
+                    "expected": "Early warning and public risk communication",
+                    "observed": "News evidence mentions warning/communication" if "warning" in observed_actions else "No clear warning evidence found",
+                    "status": audit_status("warning" in observed_actions, "warning" in gaps or "communication" in gaps),
+                    "evidence": "news response actions + preparedness gaps",
+                },
+                {
+                    "expected": "Pre-identify vulnerable people, settlements, and evacuation needs",
+                    "observed": "Affected/vulnerable groups mentioned" if llm.get("affected_or_vulnerable_groups") else "No vulnerable-group evidence found",
+                    "status": audit_status(bool(llm.get("affected_or_vulnerable_groups")), "vulnerable" in validation_needs or "groups" in gaps),
+                    "evidence": "Gemini vulnerable-group extraction",
+                },
+                {
+                    "expected": "Confirm fire-risk context and official monitoring data",
+                    "observed": "Satellite signal detected; official validation still pending",
+                    "status": "Partial" if has_fire_signal else "Missing",
+                    "evidence": satellite.get("source", "satellite evidence"),
+                },
+            ],
+        },
+        {
+            "phase": "During",
+            "score": 0,
+            "items": [
+                {
+                    "expected": "Evacuation, shelter, or resident protection actions",
+                    "observed": "Evacuation/shelter response reported" if re.search(r"evacuat|shelter", observed_actions + " " + impacts) else "No evacuation evidence extracted",
+                    "status": audit_status(bool(re.search(r"evacuat|shelter", observed_actions + " " + impacts)), "evacuation" in gaps),
+                    "evidence": "reported impacts + response actions",
+                },
+                {
+                    "expected": "Firefighting deployment and emergency coordination",
+                    "observed": "Firefighting response reported" if re.search(r"firefight|crew|aircraft|helicopter", observed_actions + " " + impacts) else "No response deployment evidence extracted",
+                    "status": audit_status(bool(re.search(r"firefight|crew|aircraft|helicopter", observed_actions + " " + impacts)), "coordination" in gaps),
+                    "evidence": "response actions + public narrative",
+                },
+                {
+                    "expected": "Road, smoke, and public safety information",
+                    "observed": "Road/smoke impacts reported" if re.search(r"road|smoke|closure|traffic", observed_actions + " " + impacts) else "No road/smoke safety evidence extracted",
+                    "status": audit_status(bool(re.search(r"road|smoke|closure|traffic", observed_actions + " " + impacts)), "communication" in gaps),
+                    "evidence": "reported impacts + response actions",
+                },
+            ],
+        },
+        {
+            "phase": "After",
+            "score": 0,
+            "items": [
+                {
+                    "expected": "Damage, casualty, and recovery assessment",
+                    "observed": "Damage/casualty impacts reported" if re.search(r"fatalit|death|damage|loss", impacts) else "No verified impact assessment evidence found",
+                    "status": audit_status(bool(re.search(r"fatalit|death|damage|loss", impacts)), "damage" in validation_needs or "impact" in validation_needs),
+                    "evidence": "reported impacts + validation needs",
+                },
+                {
+                    "expected": "Official perimeter, burned-area, and incident confirmation",
+                    "observed": "Official validation still pending",
+                    "status": "Missing" if "perimeter" in validation_needs or "official" in validation_needs else "Partial",
+                    "evidence": "validation checklist",
+                },
+                {
+                    "expected": "Lessons learned captured for future preparedness",
+                    "observed": "Lessons generated from digital memory" if llm.get("lessons_learned") else "No lessons extracted",
+                    "status": "Partial" if llm.get("lessons_learned") else "Missing",
+                    "evidence": "Gemini lessons learned",
+                },
+            ],
+        },
+    ]
+
+    for phase in phases:
+        phase["score"] = audit_score([item["status"] for item in phase["items"]])
+
+    critical_gaps = []
+    if not has_event_specific_news:
+        critical_gaps.append("News evidence is not strongly matched to the selected event window.")
+    if not has_excerpts:
+        critical_gaps.append("Full article excerpts were not available, so claims may be title/metadata based.")
+    if satellite.get("event_confidence_percent", 0) < 55:
+        critical_gaps.append("Satellite confidence is low; official fire validation is essential.")
+    if any(item["status"] == "Missing" for phase in phases for item in phase["items"]):
+        critical_gaps.append("Several preparedness lifecycle actions are missing from the available evidence.")
+    if not critical_gaps:
+        critical_gaps.append("No major audit gap detected from the currently attached evidence.")
+
+    return {
+        "overall_score": audit_score([item["status"] for phase in phases for item in phase["items"]]),
+        "phases": phases,
+        "critical_gaps": critical_gaps,
+        "evidence_basis": {
+            "articles_found": narrative.get("articles_found", 0),
+            "event_specific_articles": narrative.get("event_specific_articles", 0),
+            "article_excerpts_found": narrative.get("article_texts_found", 0),
+            "satellite_confidence_percent": satellite.get("event_confidence_percent", 0),
+            "event_status": event.get("status", "unknown"),
+        },
+    }
+
+
+def status_color(status: str) -> str:
+    return {"Met": "#16a34a", "Partial": "#d97706", "Missing": "#dc2626"}.get(status, "#6b7280")
+
+
+def render_score_ring(label: str, score: int) -> None:
+    color = confidence_color(score)
+    st.markdown(
+        f"""
+        <div style="border:1px solid #e5e7eb; border-radius:8px; padding:1rem; background:#fff; text-align:center;">
+          <div style="font-size:2rem; font-weight:800; color:{color};">{score}%</div>
+          <div style="font-size:0.86rem; color:#374151;">{html.escape(label)}</div>
+          <div style="height:8px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin-top:0.65rem;">
+            <div style="height:8px; width:{score}%; background:{color};"></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_audit_phase(phase: dict[str, Any]) -> None:
+    st.markdown(f"#### {phase['phase']}")
+    render_score_ring(f"{phase['phase']} completion", phase["score"])
+    for item in phase["items"]:
+        status = item["status"]
+        st.markdown(
+            f"""
+            <div style="border:1px solid #e5e7eb; border-left:6px solid {status_color(status)}; border-radius:8px; padding:0.8rem; margin:0.75rem 0; background:#ffffff;">
+              <div style="display:flex; justify-content:space-between; gap:0.75rem;">
+                <strong>{html.escape(item['expected'])}</strong>
+                <span style="white-space:nowrap; color:{status_color(status)}; font-weight:700;">{html.escape(status)}</span>
+              </div>
+              <div style="font-size:0.86rem; color:#374151; margin-top:0.45rem;">Observed: {html.escape(item['observed'])}</div>
+              <div style="font-size:0.78rem; color:#6b7280; margin-top:0.35rem;">Evidence: {html.escape(item['evidence'])}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def render_preparedness_audit(memory_record: dict[str, Any]) -> None:
+    audit = build_preparedness_audit(memory_record)
+    st.markdown("#### Preparedness Review & Gap Score")
+    st.caption("Compares observed evidence against what should normally be checked before, during, and after a wildfire event.")
+    score_cols = st.columns(4)
+    with score_cols[0]:
+        render_score_ring("Overall lifecycle score", audit["overall_score"])
+    for idx, phase in enumerate(audit["phases"], start=1):
+        with score_cols[idx]:
+            render_score_ring(f"{phase['phase']} score", phase["score"])
+
+    phase_cols = st.columns(3)
+    for col, phase in zip(phase_cols, audit["phases"]):
+        with col:
+            render_audit_phase(phase)
+
+    st.markdown("#### Critical Gap Map")
+    gap_cols = st.columns(min(3, max(1, len(audit["critical_gaps"]))))
+    for idx, gap in enumerate(audit["critical_gaps"]):
+        with gap_cols[idx % len(gap_cols)]:
+            st.markdown(
+                f"""
+                <div style="border:1px solid #fee2e2; border-radius:8px; padding:0.85rem; background:#fff7ed; min-height:100px;">
+                  <div style="font-weight:800; color:#b45309;">Critical gap</div>
+                  <div style="font-size:0.9rem; margin-top:0.4rem;">{html.escape(gap)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("#### Evidence Basis")
+    st.dataframe(
+        pd.DataFrame(
+            [{"Signal": key.replace("_", " ").title(), "Value": value} for key, value in audit["evidence_basis"].items()]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def compact_articles_for_llm(articles: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
     compacted = []
     for article in articles[:limit]:
@@ -1262,8 +1479,8 @@ def render_memory_record(memory_record: dict[str, Any]) -> None:
         confidence_label(satellite["event_confidence_percent"]),
     )
 
-    tab_summary, tab_ai, tab_evidence, tab_gaps, tab_raw = st.tabs(
-        ["Memory Summary", "Gemini Analysis", "Evidence", "Gaps & Limitations", "Raw Record"]
+    tab_summary, tab_ai, tab_audit, tab_evidence, tab_gaps, tab_raw = st.tabs(
+        ["Memory Summary", "Gemini Analysis", "Preparedness Audit", "Evidence", "Gaps & Limitations", "Raw Record"]
     )
 
     with tab_summary:
@@ -1358,6 +1575,12 @@ def render_memory_record(memory_record: dict[str, Any]) -> None:
             if llm_analysis.get("post_processing_note"):
                 st.caption(llm_analysis["post_processing_note"])
             st.warning(llm_analysis.get("important_limitation", "AI output requires human validation."))
+
+    with tab_audit:
+        if not llm_analysis:
+            st.info("Generate Gemini analysis first to build the preparedness audit.")
+        else:
+            render_preparedness_audit(memory_record)
 
     with tab_evidence:
         st.markdown("#### Satellite evidence")
