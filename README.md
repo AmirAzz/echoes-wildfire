@@ -28,9 +28,12 @@ Add the NASA FIRMS key in Streamlit secrets, not in the public UI:
 
 ```toml
 NASA_FIRMS_MAP_KEY = "your_firms_map_key_here"
+GEMINI_API_KEY = "your_gemini_api_key_here"
 ```
 
 `FIRMS_MAP_KEY` is also accepted as a backwards-compatible alias.
+
+`GEMINI_MODEL` is optional. If it is not set, the app uses `gemini-2.0-flash`.
 
 ## Current Workflow
 
@@ -40,7 +43,8 @@ NASA_FIRMS_MAP_KEY = "your_firms_map_key_here"
 4. The event builder clusters nearby detections in space and time.
 5. The UI shows event candidates with confidence, provenance, limitations, and a map view.
 6. Select an event and optionally fetch GDELT/news evidence for the event window.
-7. The digital memory report combines satellite evidence with a preliminary public narrative, while keeping the raw JSON record available for export/debugging.
+7. Generate Gemini memory analysis to extract reported impacts, response actions, vulnerable groups, preparedness gaps, lessons learned, early-action recommendations, and proposal value.
+8. The digital memory report combines satellite evidence, public narrative, Gemini insights, limitations, and the raw JSON record for export/debugging.
 
 Note: GDELT can rate-limit public cloud apps with HTTP 429. The Streamlit UI therefore fetches GDELT only after pressing the dedicated fetch button.
 
@@ -60,4 +64,4 @@ Note: use `SP` products for historical dates and `NRT` products for recent near-
 
 - Copernicus/EFFIS context connector.
 - OpenStreetMap nearby asset extraction.
-- LLM-based `Build Digital Memory` endpoint with citations and confidence scoring.
+- Full-article retrieval/RAG so Gemini can cite source passages, not only news titles and metadata.

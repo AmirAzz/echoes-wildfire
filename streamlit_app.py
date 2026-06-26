@@ -22,6 +22,7 @@ NASA_FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 MAX_FIRMS_DAYS_PER_CALL = 5
 FIRMS_SOURCES = [
     "VIIRS_SNPP_SP",
@@ -182,6 +183,20 @@ def get_nasa_firms_key() -> str:
         return str(st.secrets.get("NASA_FIRMS_MAP_KEY", "") or st.secrets.get("FIRMS_MAP_KEY", "")).strip()
     except Exception:
         return ""
+
+
+def get_gemini_api_key() -> str:
+    try:
+        return str(st.secrets.get("GEMINI_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+def get_gemini_model() -> str:
+    try:
+        return str(st.secrets.get("GEMINI_MODEL", "") or "gemini-2.0-flash").strip()
+    except Exception:
+        return "gemini-2.0-flash"
 
 
 @st.cache_data(ttl=86400)
@@ -491,10 +506,133 @@ def render_list(items: list[str], empty_text: str) -> None:
         st.caption(empty_text)
 
 
+def render_insight_items(items: list[Any], empty_text: str) -> None:
+    if not items:
+        st.caption(empty_text)
+        return
+    for item in items:
+        if isinstance(item, dict):
+            label = item.get("claim") or item.get("item") or item.get("recommendation") or item.get("lesson") or str(item)
+            confidence = item.get("confidence")
+            source = item.get("source_url") or item.get("source_basis")
+            suffix = f" Confidence: {confidence}." if confidence else ""
+            st.markdown(f"- {label}{suffix}")
+            if source:
+                st.caption(f"Source/basis: {source}")
+        else:
+            st.markdown(f"- {item}")
+
+
+def compact_articles_for_llm(articles: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:
+    compacted = []
+    for article in articles[:limit]:
+        compacted.append(
+            {
+                "title": article.get("title", ""),
+                "url": article.get("url", ""),
+                "domain": article.get("domain", ""),
+                "seen_date": article.get("seen_date", ""),
+                "source_type": article.get("source_type", ""),
+                "is_demo_fallback": bool(article.get("is_demo_fallback", False)),
+                "relevance": article.get("relevance", 0),
+            }
+        )
+    return compacted
+
+
+def build_gemini_prompt(memory_record: dict[str, Any], articles: list[dict[str, Any]]) -> str:
+    payload = {
+        "memory_record": memory_record,
+        "news_articles": compact_articles_for_llm(articles),
+    }
+    return (
+        "You are supporting a Horizon Europe wildfire preparedness prototype called ECHOES-Wildfire. "
+        "Transform the provided satellite event record and news evidence into a structured digital memory. "
+        "Use only the evidence provided. Do not invent casualties, causes, damage, or official decisions. "
+        "If evidence is weak or missing, say so explicitly. Return valid JSON only with this structure: "
+        "{"
+        '"executive_summary": string, '
+        '"event_timeline": [{"time": string, "claim": string, "source_basis": string, "confidence": "low|medium|high"}], '
+        '"reported_impacts": [{"claim": string, "source_url": string, "confidence": "low|medium|high", "requires_human_validation": boolean}], '
+        '"response_actions": [{"claim": string, "source_url": string, "confidence": "low|medium|high", "requires_human_validation": boolean}], '
+        '"affected_or_vulnerable_groups": [{"claim": string, "source_url": string, "confidence": "low|medium|high", "requires_human_validation": boolean}], '
+        '"preparedness_gaps": [{"claim": string, "source_basis": string, "confidence": "low|medium|high"}], '
+        '"lessons_learned": [{"lesson": string, "source_basis": string, "confidence": "low|medium|high"}], '
+        '"early_action_recommendations": [{"recommendation": string, "reason": string, "confidence": "low|medium|high"}], '
+        '"proposal_value": string, '
+        '"validation_needs": [string], '
+        '"overall_confidence": "low|medium|high"'
+        "}. Evidence payload: "
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def extract_gemini_text(response_payload: dict[str, Any]) -> str:
+    candidates = response_payload.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("Gemini returned no candidates.")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text_parts = [part.get("text", "") for part in parts if part.get("text")]
+    if not text_parts:
+        raise RuntimeError("Gemini returned no text content.")
+    return "\n".join(text_parts).strip()
+
+
+def parse_json_response(text: str) -> dict[str, Any]:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(text[start : end + 1])
+
+
+def generate_gemini_memory_analysis(
+    api_key: str,
+    model: str,
+    memory_record: dict[str, Any],
+    articles: list[dict[str, Any]],
+) -> dict[str, Any]:
+    url = f"{GEMINI_GENERATE_URL.format(model=urllib.parse.quote(model))}?{urllib.parse.urlencode({'key': api_key})}"
+    body = {
+        "contents": [{"parts": [{"text": build_gemini_prompt(memory_record, articles)}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 1800,
+            "response_mime_type": "application/json",
+        },
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            response_payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"Gemini returned HTTP {exc.code}. {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not reach Gemini API: {exc.reason}") from exc
+
+    analysis = parse_json_response(extract_gemini_text(response_payload))
+    analysis["method"] = "Gemini API structured generation over NASA FIRMS and public news metadata"
+    analysis["model"] = model
+    analysis["important_limitation"] = (
+        "The model only sees satellite metadata and news titles/metadata, not full article text or official incident reports."
+    )
+    return analysis
+
+
 def render_memory_record(memory_record: dict[str, Any]) -> None:
     event_info = memory_record["event"]
     satellite = memory_record["satellite_evidence"]
     narrative = memory_record["public_narrative"]
+    llm_analysis = memory_record.get("llm_analysis", {})
 
     st.subheader("Digital Wildfire Memory")
     st.markdown(
@@ -519,8 +657,8 @@ def render_memory_record(memory_record: dict[str, Any]) -> None:
         confidence_label(satellite["event_confidence_percent"]),
     )
 
-    tab_summary, tab_evidence, tab_gaps, tab_raw = st.tabs(
-        ["Memory Summary", "Evidence", "Gaps & Limitations", "Raw Record"]
+    tab_summary, tab_ai, tab_evidence, tab_gaps, tab_raw = st.tabs(
+        ["Memory Summary", "Gemini Analysis", "Evidence", "Gaps & Limitations", "Raw Record"]
     )
 
     with tab_summary:
@@ -538,6 +676,40 @@ def render_memory_record(memory_record: dict[str, Any]) -> None:
         if narrative.get("top_article_titles"):
             st.markdown("#### Top article titles")
             render_list(narrative["top_article_titles"], "No article titles attached yet.")
+
+    with tab_ai:
+        if not llm_analysis:
+            st.info("Gemini analysis has not been generated yet. Use the button below the news evidence table.")
+        else:
+            st.markdown("#### Executive summary")
+            st.write(llm_analysis.get("executive_summary", "No Gemini summary returned."))
+            st.markdown("#### Reported impacts")
+            render_insight_items(llm_analysis.get("reported_impacts", []), "No reported impacts extracted.")
+            st.markdown("#### Response actions")
+            render_insight_items(llm_analysis.get("response_actions", []), "No response actions extracted.")
+            st.markdown("#### Vulnerable or affected groups")
+            render_insight_items(
+                llm_analysis.get("affected_or_vulnerable_groups", []),
+                "No affected or vulnerable groups extracted.",
+            )
+            st.markdown("#### Preparedness gaps")
+            render_insight_items(llm_analysis.get("preparedness_gaps", []), "No preparedness gaps extracted.")
+            st.markdown("#### Lessons learned")
+            render_insight_items(llm_analysis.get("lessons_learned", []), "No lessons learned extracted.")
+            st.markdown("#### Early-action recommendations")
+            render_insight_items(
+                llm_analysis.get("early_action_recommendations", []),
+                "No early-action recommendations extracted.",
+            )
+            st.markdown("#### Proposal value")
+            st.write(llm_analysis.get("proposal_value", "No proposal value returned."))
+            st.markdown("#### Validation needs")
+            render_insight_items(llm_analysis.get("validation_needs", []), "No validation needs returned.")
+            st.caption(
+                f"Model: {llm_analysis.get('model', 'unknown')} | "
+                f"Overall confidence: {llm_analysis.get('overall_confidence', 'unknown')}"
+            )
+            st.warning(llm_analysis.get("important_limitation", "AI output requires human validation."))
 
     with tab_evidence:
         st.markdown("#### Satellite evidence")
@@ -607,10 +779,16 @@ with st.sidebar:
         help="Use SP for historical dates and NRT for recent near-real-time detections.",
     )
     nasa_key = get_nasa_firms_key()
+    gemini_key = get_gemini_api_key()
+    gemini_model = get_gemini_model()
     if nasa_key:
         st.success("NASA FIRMS key loaded from Streamlit secrets.")
     else:
         st.info("No NASA FIRMS key found in Streamlit secrets. Demo mode is available.")
+    if gemini_key:
+        st.success("Gemini API key loaded from Streamlit secrets.")
+    else:
+        st.info("No Gemini API key found. Add GEMINI_API_KEY in Streamlit secrets to generate AI memory insights.")
     demo_mode = st.checkbox(
         "Use demo data",
         value=not bool(nasa_key),
@@ -740,6 +918,8 @@ if "gdelt_results" not in st.session_state:
     st.session_state.gdelt_results = {}
 if "google_news_results" not in st.session_state:
     st.session_state.google_news_results = {}
+if "gemini_results" not in st.session_state:
+    st.session_state.gemini_results = {}
 
 if attach_gdelt or attach_google_news:
     st.subheader("News Evidence")
@@ -859,10 +1039,49 @@ memory_record = {
             "google_news_rss": "Google News RSS" if attach_google_news else "not requested",
         },
         "official_context": "pending Copernicus/EFFIS connector",
-        "llm_analysis": "pending RAG/LLM module",
+        "llm_analysis": "Gemini API" if gemini_key else "pending Gemini API key",
     },
     "missing_data": missing_data,
 }
+
+gemini_cache_key = (
+    f"gemini-v1|{memory_record['memory_id']}|{event['start']}|{event['end']}|"
+    f"{len(articles)}|{gemini_model}"
+)
+st.subheader("Gemini Memory Analysis")
+st.caption(
+    "Gemini turns the satellite event and news metadata into lessons, gaps, early-action recommendations, "
+    "and proposal-ready memory insights. It does not replace official validation."
+)
+if not gemini_key:
+    st.info("Add GEMINI_API_KEY in Streamlit secrets to enable this step.")
+elif not articles:
+    st.warning("Fetch Google News RSS or GDELT evidence first, then generate Gemini analysis.")
+else:
+    col_generate, col_clear = st.columns([1, 3])
+    with col_generate:
+        generate_gemini = st.button("Generate Gemini memory analysis")
+    with col_clear:
+        if st.button("Clear cached Gemini analysis"):
+            st.session_state.gemini_results.pop(gemini_cache_key, None)
+            st.info("Cleared Gemini analysis for this event.")
+            generate_gemini = False
+
+    if generate_gemini:
+        with st.spinner("Generating structured digital memory analysis with Gemini..."):
+            try:
+                st.session_state.gemini_results[gemini_cache_key] = {
+                    "analysis": generate_gemini_memory_analysis(gemini_key, gemini_model, memory_record, articles),
+                    "error": "",
+                }
+            except Exception as exc:
+                st.session_state.gemini_results[gemini_cache_key] = {"analysis": {}, "error": str(exc)}
+
+cached_gemini = st.session_state.gemini_results.get(gemini_cache_key, {"analysis": {}, "error": ""})
+if cached_gemini.get("analysis"):
+    memory_record["llm_analysis"] = cached_gemini["analysis"]
+elif cached_gemini.get("error"):
+    st.warning(f"Gemini analysis failed: {cached_gemini['error']}")
 
 render_memory_record(memory_record)
 
