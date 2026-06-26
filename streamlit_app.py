@@ -886,6 +886,105 @@ def fallback_memory_analysis(
     }
 
 
+def claim_from_summary(summary: str, pattern: str, label: str, source_basis: str) -> dict[str, Any] | None:
+    if re.search(pattern, summary, flags=re.IGNORECASE):
+        return {
+            "claim": label,
+            "source_url": "",
+            "source_basis": source_basis,
+            "confidence": "medium",
+            "requires_human_validation": True,
+        }
+    return None
+
+
+def normalize_gemini_analysis(
+    analysis: dict[str, Any],
+    memory_record: dict[str, Any],
+    articles: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summary = analysis.get("executive_summary", "")
+    source_basis = "Gemini executive summary derived from attached news evidence"
+
+    if summary and not analysis.get("reported_impacts"):
+        inferred_impacts = [
+            claim_from_summary(summary, r"\bfatalit|dead|death|killed\b", "fatalities reported", source_basis),
+            claim_from_summary(summary, r"\bevacuat|mass evacuation\b", "evacuations reported", source_basis),
+            claim_from_summary(summary, r"\b(loss|losses|damage|homes?|property|economic)\b", "damage or economic losses reported", source_basis),
+            claim_from_summary(summary, r"\broad|highway|closure|traffic\b", "road disruption reported", source_basis),
+        ]
+        analysis["reported_impacts"] = [item for item in inferred_impacts if item]
+
+    if summary and not analysis.get("response_actions"):
+        inferred_actions = [
+            claim_from_summary(summary, r"\bfirefighter|firefighting|crews?|aircraft|helicopter\b", "firefighting response reported", source_basis),
+            claim_from_summary(summary, r"\bevacuat|shelter\b", "evacuation or shelter response reported", source_basis),
+        ]
+        analysis["response_actions"] = [item for item in inferred_actions if item]
+
+    if not analysis.get("preparedness_gaps"):
+        analysis["preparedness_gaps"] = [
+            {
+                "claim": "Official incident reports, perimeter data, and verified impacts are still required.",
+                "source_basis": "Digital memory validation checklist",
+                "confidence": "high",
+            }
+        ]
+
+    if not analysis.get("lessons_learned"):
+        analysis["lessons_learned"] = [
+            {
+                "lesson": "Combine satellite detections with article-level evidence before drawing operational conclusions.",
+                "source_basis": "Current evidence mix and validation gaps",
+                "confidence": "medium",
+            }
+        ]
+
+    if not analysis.get("early_action_recommendations"):
+        analysis["early_action_recommendations"] = [
+            {
+                "recommendation": "Validate the candidate event with official civil protection or EFFIS/Copernicus data.",
+                "reason": "FIRMS detections and media reports do not equal official incident confirmation.",
+                "confidence": "high",
+            },
+            {
+                "recommendation": "Extract cited claims from full article text and official updates.",
+                "reason": "Article titles and short excerpts can miss response details and vulnerable-group impacts.",
+                "confidence": "high",
+            },
+        ]
+
+    if not analysis.get("affected_or_vulnerable_groups") and re.search(
+        r"\bevacuated|residents|villages?|communities|elderly|children|tourists\b",
+        summary,
+        flags=re.IGNORECASE,
+    ):
+        analysis["affected_or_vulnerable_groups"] = [
+            {
+                "claim": "Affected residents or communities are mentioned but need source-level verification.",
+                "source_url": "",
+                "source_basis": source_basis,
+                "confidence": "low",
+                "requires_human_validation": True,
+            }
+        ]
+
+    if not analysis.get("validation_needs"):
+        top_titles = [article.get("title", "") for article in articles[:2] if article.get("title")]
+        analysis["validation_needs"] = [
+            "Official incident confirmation",
+            "Fire perimeter or burned-area layer",
+            "Verified casualty, evacuation, and damage figures",
+            *top_titles,
+        ]
+
+    analysis["post_processed"] = True
+    analysis["post_processing_note"] = (
+        "Empty Gemini sections were backfilled from explicit summary claims and validation rules."
+    )
+    return analysis
+
+
 def generate_gemini_memory_analysis(
     api_key: str,
     model: str,
@@ -951,6 +1050,7 @@ def generate_gemini_memory_analysis(
     except json.JSONDecodeError as exc:
         preview = response_text[:220].replace("\n", " ")
         return fallback_memory_analysis(memory_record, articles, selected_model, str(exc), preview)
+    analysis = normalize_gemini_analysis(analysis, memory_record, articles)
     analysis["method"] = "Gemini API structured generation over NASA FIRMS and public news metadata"
     analysis["model"] = selected_model
     analysis["important_limitation"] = (
@@ -1040,6 +1140,8 @@ def render_memory_record(memory_record: dict[str, Any]) -> None:
                 f"Model: {llm_analysis.get('model', 'unknown')} | "
                 f"Overall confidence: {llm_analysis.get('overall_confidence', 'unknown')}"
             )
+            if llm_analysis.get("post_processing_note"):
+                st.caption(llm_analysis["post_processing_note"])
             st.warning(llm_analysis.get("important_limitation", "AI output requires human validation."))
 
     with tab_evidence:
