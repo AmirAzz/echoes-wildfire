@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import html
+import re
 import json
 import math
 import urllib.error
@@ -26,6 +28,8 @@ GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_MODEL_FALLBACKS = ["gemini-3.5-flash", "gemini-3-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 GEMINI_RETRYABLE_HTTP_CODES = {404, 429, 503}
+ARTICLE_MAX_CHARS = 1800
+ARTICLE_FETCH_LIMIT = 5
 MAX_FIRMS_DAYS_PER_CALL = 5
 FIRMS_SOURCES = [
     "VIIRS_SNPP_SP",
@@ -336,6 +340,104 @@ def fetch_google_news_articles(country: str, region: str, max_records: int) -> l
     return sorted(articles, key=lambda row: row["relevance"], reverse=True)
 
 
+def clean_html_text(text: str) -> str:
+    text = html.unescape(text)
+    text = re.sub(r"<(script|style|noscript).*?</\1>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def extract_meta_description(html_text: str) -> str:
+    patterns = [
+        r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']description["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:description["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html_text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return clean_html_text(match.group(1))
+    return ""
+
+
+def resolve_google_news_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if "news.google." not in parsed.netloc:
+        return url
+    params = urllib.parse.parse_qs(parsed.query)
+    for key in ("url", "q"):
+        if params.get(key):
+            return params[key][0]
+    return url
+
+
+def extract_article_text_from_html(html_text: str) -> str:
+    meta_description = extract_meta_description(html_text)
+    paragraphs = re.findall(r"<p\b[^>]*>(.*?)</p>", html_text, flags=re.IGNORECASE | re.DOTALL)
+    paragraph_texts = [clean_html_text(paragraph) for paragraph in paragraphs]
+    paragraph_texts = [text for text in paragraph_texts if len(text) >= 80]
+    combined = " ".join([meta_description, *paragraph_texts[:8]]).strip()
+    if not combined:
+        combined = clean_html_text(html_text)
+    return combined[:ARTICLE_MAX_CHARS]
+
+
+@st.cache_data(ttl=86400)
+def fetch_article_excerpt(url: str) -> dict[str, Any]:
+    if not url or url.startswith("demo://"):
+        return {"status": "skipped", "resolved_url": url, "excerpt": "", "error": "No fetchable public URL."}
+
+    resolved_url = resolve_google_news_url(url)
+    request = urllib.request.Request(
+        resolved_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; ECHOES-Wildfire/0.1; +https://streamlit.app)",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            content_type = response.headers.get("Content-Type", "")
+            if "html" not in content_type.lower():
+                return {
+                    "status": "unsupported",
+                    "resolved_url": resolved_url,
+                    "excerpt": "",
+                    "error": f"Unsupported content type: {content_type}",
+                }
+            raw_html = response.read(600_000).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return {"status": "failed", "resolved_url": resolved_url, "excerpt": "", "error": f"HTTP {exc.code}"}
+    except urllib.error.URLError as exc:
+        return {"status": "failed", "resolved_url": resolved_url, "excerpt": "", "error": str(exc.reason)}
+
+    excerpt = extract_article_text_from_html(raw_html)
+    if not excerpt:
+        return {"status": "empty", "resolved_url": resolved_url, "excerpt": "", "error": "No readable text found."}
+    return {"status": "ok", "resolved_url": resolved_url, "excerpt": excerpt, "error": ""}
+
+
+def attach_article_excerpts(articles: list[dict[str, Any]], limit: int = ARTICLE_FETCH_LIMIT) -> list[dict[str, Any]]:
+    enriched = []
+    for idx, article in enumerate(articles):
+        enriched_article = dict(article)
+        if idx < limit and not article.get("is_demo_fallback"):
+            evidence = fetch_article_excerpt(article.get("url", ""))
+            enriched_article["resolved_url"] = evidence["resolved_url"]
+            enriched_article["article_excerpt"] = evidence["excerpt"]
+            enriched_article["article_fetch_status"] = evidence["status"]
+            enriched_article["article_fetch_error"] = evidence["error"]
+        else:
+            enriched_article.setdefault("resolved_url", article.get("url", ""))
+            enriched_article.setdefault("article_excerpt", "")
+            enriched_article.setdefault("article_fetch_status", "not requested")
+            enriched_article.setdefault("article_fetch_error", "")
+        enriched.append(enriched_article)
+    return enriched
+
+
 def build_public_narrative(articles: list[dict[str, Any]]) -> dict[str, Any]:
     if not articles:
         return {
@@ -358,22 +460,26 @@ def build_public_narrative(articles: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     domains = sorted({article["domain"] for article in articles if article["domain"]})
     source_types = sorted({article.get("source_type", "GDELT Doc API") for article in articles})
+    article_texts_found = sum(1 for article in articles if article.get("article_excerpt"))
     confidence = min(0.9, 0.35 + len(articles) * 0.04 + len(domains) * 0.025)
+    if article_texts_found:
+        confidence = min(0.95, confidence + min(0.15, article_texts_found * 0.03))
     confidence = round(confidence, 2)
     top_titles = titles[:5]
 
     return {
         "source": " + ".join(source_types),
         "articles_found": len(articles),
+        "article_texts_found": article_texts_found,
         "distinct_domains": len(domains),
         "top_sources": domains[:8],
         "reported_impacts_preliminary": reported_impacts,
-        "summary": "Public reporting was found for this event window. The current summary is rule-based and uses article titles only; the next LLM/RAG module should extract claims with citations from article text.",
+        "summary": "Public reporting was found for this event window. Article excerpts are used when available; otherwise the system falls back to news titles and metadata.",
         "top_article_titles": top_titles,
         "confidence": confidence,
         "limitations": [
             "GDELT is a public media index and may miss local or non-indexed sources.",
-            "Current extraction is title-based and should not be treated as verified impact assessment.",
+            "Current extraction may use partial article text and should not be treated as verified impact assessment.",
             "Duplicate syndication and uneven media attention can bias event visibility.",
         ],
     }
@@ -545,6 +651,9 @@ def compact_articles_for_llm(articles: list[dict[str, Any]], limit: int = 5) -> 
                 "source_type": article.get("source_type", ""),
                 "is_demo_fallback": bool(article.get("is_demo_fallback", False)),
                 "relevance": article.get("relevance", 0),
+                "resolved_url": article.get("resolved_url", article.get("url", "")),
+                "article_excerpt": article.get("article_excerpt", "")[:ARTICLE_MAX_CHARS],
+                "article_fetch_status": article.get("article_fetch_status", ""),
             }
         )
     return compacted
@@ -944,6 +1053,7 @@ def render_memory_record(memory_record: dict[str, Any]) -> None:
                 [
                     {"Field": "Source", "Value": narrative.get("source", "not attached")},
                     {"Field": "Articles found", "Value": narrative.get("articles_found", 0)},
+                    {"Field": "Article excerpts found", "Value": narrative.get("article_texts_found", 0)},
                     {"Field": "Distinct domains", "Value": narrative.get("distinct_domains", 0)},
                     {"Field": "Narrative confidence", "Value": narrative.get("confidence", 0.0)},
                     {"Field": "Status", "Value": narrative.get("status", "available")},
@@ -1086,6 +1196,9 @@ if run:
             "bbox": bbox,
         }
         st.session_state.gdelt_results = {}
+        st.session_state.google_news_results = {}
+        st.session_state.article_text_results = {}
+        st.session_state.gemini_results = {}
 
 search_results = st.session_state.search_results
 detections = search_results["detections"]
@@ -1131,6 +1244,8 @@ if "gdelt_results" not in st.session_state:
     st.session_state.gdelt_results = {}
 if "google_news_results" not in st.session_state:
     st.session_state.google_news_results = {}
+if "article_text_results" not in st.session_state:
+    st.session_state.article_text_results = {}
 if "gemini_results" not in st.session_state:
     st.session_state.gemini_results = {}
 
@@ -1140,6 +1255,7 @@ if attach_gdelt or attach_google_news:
     if st.button("Clear cached news evidence"):
         st.session_state.gdelt_results = {}
         st.session_state.google_news_results = {}
+        st.session_state.article_text_results = {}
         st.info("Cleared cached news evidence for this session.")
 
 if attach_google_news:
@@ -1177,6 +1293,29 @@ if attach_gdelt:
         articles = demo_news_fallback(country, area_name, event)
         st.session_state.gdelt_results[gdelt_cache_key] = {"articles": articles, "error": gdelt_error}
 
+article_text_cache_key = (
+    f"article-text-v1|{country}|{area_name}|{selected_id}|{event['start']}|{event['end']}|"
+    f"{len(articles)}|limit={ARTICLE_FETCH_LIMIT}"
+)
+if attach_gdelt or attach_google_news:
+    if articles:
+        if st.button(f"Fetch full article excerpts for top {ARTICLE_FETCH_LIMIT} news rows"):
+            with st.spinner("Fetching readable article excerpts for stronger evidence extraction..."):
+                st.session_state.article_text_results[article_text_cache_key] = {
+                    "articles": attach_article_excerpts(articles, ARTICLE_FETCH_LIMIT),
+                    "error": "",
+                }
+
+        cached_article_text = st.session_state.article_text_results.get(
+            article_text_cache_key, {"articles": [], "error": ""}
+        )
+        if cached_article_text["articles"]:
+            articles = cached_article_text["articles"]
+            excerpt_count = sum(1 for article in articles if article.get("article_excerpt"))
+            st.success(f"Attached readable excerpts for {excerpt_count} article(s).")
+        elif cached_article_text["error"]:
+            st.warning(f"Article excerpt retrieval warning: {cached_article_text['error']}")
+
 public_narrative = build_public_narrative(articles)
 if articles and any(article.get("is_demo_fallback") for article in articles):
     public_narrative["source"] = "Demo news fallback after GDELT retrieval failure"
@@ -1205,11 +1344,44 @@ if attach_gdelt or attach_google_news:
             articles_df["source_type"] = articles_df["domain"].apply(
                 lambda domain: "Demo fallback" if domain == "demo-fallback.local" else "GDELT Doc API"
             )
+        for column, default in {
+            "article_fetch_status": "not requested",
+            "article_excerpt": "",
+            "resolved_url": "",
+        }.items():
+            if column not in articles_df:
+                articles_df[column] = default
         st.dataframe(
-            articles_df[["source_type", "relevance", "seen_date", "domain", "language", "source_country", "is_demo_fallback", "title", "url"]],
+            articles_df[
+                [
+                    "source_type",
+                    "relevance",
+                    "seen_date",
+                    "domain",
+                    "language",
+                    "source_country",
+                    "article_fetch_status",
+                    "is_demo_fallback",
+                    "title",
+                    "url",
+                ]
+            ],
             use_container_width=True,
             hide_index=True,
         )
+        excerpt_rows = [
+            {
+                "domain": article.get("domain", ""),
+                "title": article.get("title", ""),
+                "excerpt": article.get("article_excerpt", ""),
+                "resolved_url": article.get("resolved_url", article.get("url", "")),
+            }
+            for article in articles
+            if article.get("article_excerpt")
+        ]
+        if excerpt_rows:
+            with st.expander("Readable article excerpts used for Gemini", expanded=False):
+                st.dataframe(pd.DataFrame(excerpt_rows), use_container_width=True, hide_index=True)
         if any(article.get("is_demo_fallback") for article in articles):
             st.warning("Showing demo fallback rows because GDELT was rate-limited. These are not real news articles.")
     elif gdelt_error:
@@ -1259,11 +1431,11 @@ memory_record = {
 
 gemini_cache_key = (
     f"gemini-v1|{memory_record['memory_id']}|{event['start']}|{event['end']}|"
-    f"{len(articles)}|{gemini_model}"
+    f"{len(articles)}|excerpts={public_narrative.get('article_texts_found', 0)}|{gemini_model}"
 )
 st.subheader("Gemini Memory Analysis")
 st.caption(
-    "Gemini turns the satellite event and news metadata into lessons, gaps, early-action recommendations, "
+    "Gemini turns the satellite event, news metadata, and readable article excerpts into lessons, gaps, early-action recommendations, "
     "and proposal-ready memory insights. It does not replace official validation."
 )
 if not gemini_key:
