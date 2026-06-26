@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import email.utils
 import html
 import re
 import json
@@ -249,7 +250,41 @@ def event_date_window(event: dict[str, Any], padding_days: int = 2) -> tuple[dat
     return start, end
 
 
-def article_relevance(article: dict[str, Any], country: str, region: str) -> float:
+def parse_article_seen_date(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%d%H%M%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[: len(datetime.now().strftime(fmt))], fmt)
+        except ValueError:
+            pass
+    try:
+        parsed = email.utils.parsedate_to_datetime(text)
+        if parsed.tzinfo:
+            parsed = parsed.replace(tzinfo=None)
+        return parsed
+    except (TypeError, ValueError):
+        return None
+
+
+def days_from_event(article_date: datetime | None, event_start: datetime, event_end: datetime) -> int | None:
+    if article_date is None:
+        return None
+    if event_start <= article_date <= event_end:
+        return 0
+    if article_date < event_start:
+        return (event_start.date() - article_date.date()).days
+    return (article_date.date() - event_end.date()).days
+
+
+def article_relevance(
+    article: dict[str, Any],
+    country: str,
+    region: str,
+    event_start: datetime | None = None,
+    event_end: datetime | None = None,
+) -> float:
     text = f"{article.get('title', '')} {article.get('domain', '')}".lower()
     score = 0.25
     if country.lower() in text:
@@ -257,6 +292,25 @@ def article_relevance(article: dict[str, Any], country: str, region: str) -> flo
     if region.lower() in text:
         score += 0.25
     score += min(0.35, sum(0.08 for term in WILDFIRE_TERMS if term in text))
+    if event_start and event_end:
+        article_date = parse_article_seen_date(article.get("seen_date", ""))
+        day_gap = days_from_event(article_date, event_start, event_end)
+        article["event_day_gap"] = day_gap
+        if day_gap is None:
+            article["event_match"] = "unknown date"
+            score -= 0.05
+        elif day_gap == 0:
+            article["event_match"] = "inside event window"
+            score += 0.22
+        elif day_gap <= 2:
+            article["event_match"] = "near event window"
+            score += 0.16
+        elif day_gap <= 7:
+            article["event_match"] = "same incident period"
+            score += 0.08
+        else:
+            article["event_match"] = "area-level only"
+            score -= 0.12
     return round(min(score, 1.0), 2)
 
 
@@ -299,15 +353,24 @@ def fetch_gdelt_articles(country: str, region: str, start: datetime, end: dateti
             "source_country": item.get("sourceCountry", ""),
             "seen_date": item.get("seendate", ""),
         }
-        article["relevance"] = article_relevance(article, country, region)
+        article["source_type"] = "GDELT Doc API"
+        article["relevance"] = article_relevance(article, country, region, start, end)
         articles.append(article)
 
     return sorted(articles, key=lambda row: row["relevance"], reverse=True)
 
 
 @st.cache_data(ttl=1800)
-def fetch_google_news_articles(country: str, region: str, max_records: int) -> list[dict[str, Any]]:
-    query = f'{region} {country} wildfire OR "forest fire"'
+def fetch_google_news_articles(
+    country: str,
+    region: str,
+    event_start: datetime,
+    event_end: datetime,
+    max_records: int,
+) -> list[dict[str, Any]]:
+    start_date = event_start.date().isoformat()
+    before_date = (event_end.date() + timedelta(days=1)).isoformat()
+    query = f'{region} {country} (wildfire OR "forest fire" OR evacuation OR firefighters) after:{start_date} before:{before_date}'
     params = {
         "q": query,
         "hl": "en",
@@ -321,7 +384,7 @@ def fetch_google_news_articles(country: str, region: str, max_records: int) -> l
 
     root = ET.fromstring(xml_text)
     articles = []
-    for item in root.findall(".//item")[:max_records]:
+    for item in root.findall(".//item")[: max_records * 3]:
         title = item.findtext("title", default="Untitled")
         link = item.findtext("link", default="")
         pub_date = item.findtext("pubDate", default="")
@@ -336,9 +399,9 @@ def fetch_google_news_articles(country: str, region: str, max_records: int) -> l
             "seen_date": pub_date,
             "source_type": "Google News RSS",
         }
-        article["relevance"] = article_relevance(article, country, region)
+        article["relevance"] = article_relevance(article, country, region, event_start, event_end)
         articles.append(article)
-    return sorted(articles, key=lambda row: row["relevance"], reverse=True)
+    return sorted(articles, key=lambda row: row["relevance"], reverse=True)[:max_records]
 
 
 def clean_html_text(text: str) -> str:
@@ -462,6 +525,11 @@ def build_public_narrative(articles: list[dict[str, Any]]) -> dict[str, Any]:
     domains = sorted({article["domain"] for article in articles if article["domain"]})
     source_types = sorted({article.get("source_type", "GDELT Doc API") for article in articles})
     article_texts_found = sum(1 for article in articles if article.get("article_excerpt"))
+    event_specific_articles = sum(
+        1
+        for article in articles
+        if article.get("event_match") in {"inside event window", "near event window", "same incident period"}
+    )
     confidence = min(0.9, 0.35 + len(articles) * 0.04 + len(domains) * 0.025)
     if article_texts_found:
         confidence = min(0.95, confidence + min(0.15, article_texts_found * 0.03))
@@ -471,6 +539,7 @@ def build_public_narrative(articles: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "source": " + ".join(source_types),
         "articles_found": len(articles),
+        "event_specific_articles": event_specific_articles,
         "article_texts_found": article_texts_found,
         "distinct_domains": len(domains),
         "top_sources": domains[:8],
@@ -481,6 +550,7 @@ def build_public_narrative(articles: list[dict[str, Any]]) -> dict[str, Any]:
         "limitations": [
             "GDELT is a public media index and may miss local or non-indexed sources.",
             "Current extraction may use partial article text and should not be treated as verified impact assessment.",
+            "News evidence is ranked against the selected event window, but may still describe wider area-level incidents.",
             "Duplicate syndication and uneven media attention can bias event visibility.",
         ],
     }
@@ -754,6 +824,8 @@ def compact_articles_for_llm(articles: list[dict[str, Any]], limit: int = 5) -> 
                 "source_type": article.get("source_type", ""),
                 "is_demo_fallback": bool(article.get("is_demo_fallback", False)),
                 "relevance": article.get("relevance", 0),
+                "event_match": article.get("event_match", ""),
+                "event_day_gap": article.get("event_day_gap", ""),
                 "resolved_url": article.get("resolved_url", article.get("url", "")),
                 "article_excerpt": article.get("article_excerpt", "")[:ARTICLE_MAX_CHARS],
                 "article_fetch_status": article.get("article_fetch_status", ""),
@@ -1307,6 +1379,7 @@ def render_memory_record(memory_record: dict[str, Any]) -> None:
                 [
                     {"Field": "Source", "Value": narrative.get("source", "not attached")},
                     {"Field": "Articles found", "Value": narrative.get("articles_found", 0)},
+                    {"Field": "Event-specific articles", "Value": narrative.get("event_specific_articles", 0)},
                     {"Field": "Article excerpts found", "Value": narrative.get("article_texts_found", 0)},
                     {"Field": "Distinct domains", "Value": narrative.get("distinct_domains", 0)},
                     {"Field": "Narrative confidence", "Value": narrative.get("confidence", 0.0)},
@@ -1489,11 +1562,15 @@ event = next(item for item in events if item["event_id"] == selected_id)
 
 articles: list[dict[str, Any]] = []
 gdelt_error = ""
+news_start, news_end = event_date_window(event)
 gdelt_cache_key = (
     f"gdelt-v2|{country}|{area_name}|{selected_id}|{event['start']}|{event['end']}|"
     f"{gdelt_max_records}|fallback={use_news_fallback}"
 )
-google_news_cache_key = f"google-news-v1|{country}|{area_name}|{selected_id}|{google_news_max_records}"
+google_news_cache_key = (
+    f"google-news-v2|{country}|{area_name}|{selected_id}|{event['start']}|{event['end']}|"
+    f"{google_news_max_records}"
+)
 if "gdelt_results" not in st.session_state:
     st.session_state.gdelt_results = {}
 if "google_news_results" not in st.session_state:
@@ -1506,6 +1583,7 @@ if "gemini_results" not in st.session_state:
 if attach_gdelt or attach_google_news:
     st.subheader("News Evidence")
     st.caption("News sources are fetched only when you press a button, reducing rate-limit errors on Streamlit Cloud.")
+    st.caption(f"Event-aware news window: {news_start.date()} to {news_end.date()}. Articles outside this window are down-ranked.")
     if st.button("Clear cached news evidence"):
         st.session_state.gdelt_results = {}
         st.session_state.google_news_results = {}
@@ -1516,7 +1594,7 @@ if attach_google_news:
     if st.button("Fetch Google News RSS evidence for selected event"):
         with st.spinner("Collecting Google News RSS evidence for the selected event..."):
             try:
-                google_articles = fetch_google_news_articles(country, area_name, google_news_max_records)
+                google_articles = fetch_google_news_articles(country, area_name, news_start, news_end, google_news_max_records)
                 st.session_state.google_news_results[google_news_cache_key] = {"articles": google_articles, "error": ""}
             except Exception as exc:
                 st.session_state.google_news_results[google_news_cache_key] = {"articles": [], "error": str(exc)}
@@ -1530,10 +1608,9 @@ if attach_google_news:
 
 if attach_gdelt:
     if st.button("Fetch GDELT/news evidence for selected event"):
-        gdelt_start, gdelt_end = event_date_window(event)
         with st.spinner("Collecting GDELT/news evidence for the selected event..."):
             try:
-                fetched_articles = fetch_gdelt_articles(country, area_name, gdelt_start, gdelt_end, gdelt_max_records)
+                fetched_articles = fetch_gdelt_articles(country, area_name, news_start, news_end, gdelt_max_records)
                 st.session_state.gdelt_results[gdelt_cache_key] = {"articles": fetched_articles, "error": ""}
             except Exception as exc:  # Keep the memory record even if GDELT is temporarily unavailable.
                 fallback_articles = demo_news_fallback(country, area_name, event) if use_news_fallback else []
@@ -1602,6 +1679,8 @@ if attach_gdelt or attach_google_news:
             "article_fetch_status": "not requested",
             "article_excerpt": "",
             "resolved_url": "",
+            "event_match": "not scored",
+            "event_day_gap": "",
         }.items():
             if column not in articles_df:
                 articles_df[column] = default
@@ -1614,6 +1693,8 @@ if attach_gdelt or attach_google_news:
                     "domain",
                     "language",
                     "source_country",
+                    "event_match",
+                    "event_day_gap",
                     "article_fetch_status",
                     "is_demo_fallback",
                     "title",

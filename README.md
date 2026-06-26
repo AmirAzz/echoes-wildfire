@@ -42,7 +42,7 @@ GEMINI_API_KEY = "your_gemini_api_key_here"
 3. The backend fetches FIRMS hotspot CSV data or uses bundled mock detections.
 4. The event builder clusters nearby detections in space and time.
 5. The UI shows event candidates with confidence, provenance, limitations, and a map view.
-6. Select an event and optionally fetch GDELT/news evidence for the event window.
+6. Select an event and optionally fetch GDELT/news evidence ranked against the selected event window.
 7. Optionally fetch readable article excerpts for the top news rows to strengthen claim extraction beyond titles and metadata.
 8. Generate Gemini memory analysis to extract reported impacts, response actions, vulnerable groups, preparedness gaps, lessons learned, early-action recommendations, and proposal value.
 9. Review the Gemini Memory Board with confidence bars, timeline, insight cards, and a validation checklist.
@@ -55,6 +55,8 @@ If GDELT is rate-limited, the app can optionally show clearly marked demo fallba
 Google News RSS is also available as a no-key fallback news source. It is easier to use for demos, but it should still be treated as public media evidence rather than official confirmation.
 
 Full article extraction uses public article URLs and stores only short readable excerpts in the session. Some publishers block automated reading, so the app records fetch status and falls back to titles/metadata when needed.
+
+News retrieval is event-aware: GDELT and Google News evidence are queried or ranked around the selected candidate's time window. Articles outside the event window are down-ranked and marked as area-level evidence.
 
 Note: preset regions are examples only. Use `Custom city/area` for any city or municipality not listed. The app geocodes custom areas with OpenStreetMap Nominatim.
 
