@@ -5,6 +5,7 @@ import html
 import re
 import json
 import math
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -921,7 +922,7 @@ def generate_gemini_memory_analysis(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=45) as response:
+            with urllib.request.urlopen(request, timeout=30) as response:
                 response_payload = json.loads(response.read().decode("utf-8", errors="replace"))
             selected_model = candidate_model
             break
@@ -931,7 +932,15 @@ def generate_gemini_memory_analysis(
             if exc.code not in GEMINI_RETRYABLE_HTTP_CODES:
                 raise RuntimeError(last_error) from exc
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError | socket.timeout):
+                selected_model = candidate_model
+                last_error = f"Gemini model {candidate_model} timed out before returning a response."
+                return fallback_memory_analysis(memory_record, articles, selected_model, str(exc.reason))
             raise RuntimeError(f"Could not reach Gemini API: {exc.reason}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            selected_model = candidate_model
+            last_error = f"Gemini model {candidate_model} timed out before returning a response."
+            return fallback_memory_analysis(memory_record, articles, selected_model, str(exc))
 
     if response_payload is None:
         raise RuntimeError(last_error or "Gemini did not return a usable response.")
