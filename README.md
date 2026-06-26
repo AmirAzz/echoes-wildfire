@@ -22,7 +22,7 @@ Use this main file path:
 streamlit_app.py
 ```
 
-The Streamlit version supports the MVP flow: country/region/date input, NASA FIRMS or demo detections, event candidate clustering, GDELT/news evidence retrieval, provenance, confidence scoring, and a first digital memory preview.
+The Streamlit version supports the MVP flow: country/region/date input, NASA FIRMS or demo detections, event candidate clustering, GDELT and Google News RSS evidence retrieval, provenance, confidence scoring, and a first digital memory preview.
 
 Add the NASA FIRMS key in Streamlit secrets, not in the public UI:
 
@@ -45,6 +45,8 @@ NASA_FIRMS_MAP_KEY = "your_firms_map_key_here"
 Note: GDELT can rate-limit public cloud apps with HTTP 429. The Streamlit UI therefore fetches GDELT only after pressing the dedicated fetch button.
 
 If GDELT is rate-limited, the app can optionally show clearly marked demo fallback news rows. These rows are not real articles and must not be cited as external evidence.
+
+Google News RSS is also available as a no-key fallback news source. It is easier to use for demos, but it should still be treated as public media evidence rather than official confirmation.
 
 Note: preset regions are examples only. Use `Custom city/area` for any city or municipality not listed. The app geocodes custom areas with OpenStreetMap Nominatim.
 

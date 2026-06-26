@@ -6,6 +6,7 @@ import math
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ ROOT = Path(__file__).parent
 REGIONS_PATH = ROOT / "data" / "regions.json"
 NASA_FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{bbox}/{days}/{start}"
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 MAX_FIRMS_DAYS_PER_CALL = 5
 FIRMS_SOURCES = [
@@ -273,6 +275,42 @@ def fetch_gdelt_articles(country: str, region: str, start: datetime, end: dateti
     return sorted(articles, key=lambda row: row["relevance"], reverse=True)
 
 
+@st.cache_data(ttl=1800)
+def fetch_google_news_articles(country: str, region: str, max_records: int) -> list[dict[str, Any]]:
+    query = f'{region} {country} wildfire OR "forest fire"'
+    params = {
+        "q": query,
+        "hl": "en",
+        "gl": "US",
+        "ceid": "US:en",
+    }
+    url = f"{GOOGLE_NEWS_RSS_URL}?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(url, headers={"User-Agent": "ECHOES-Wildfire/0.1"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        xml_text = response.read().decode("utf-8", errors="replace")
+
+    root = ET.fromstring(xml_text)
+    articles = []
+    for item in root.findall(".//item")[:max_records]:
+        title = item.findtext("title", default="Untitled")
+        link = item.findtext("link", default="")
+        pub_date = item.findtext("pubDate", default="")
+        source_el = item.find("source")
+        domain = source_el.text if source_el is not None and source_el.text else "Google News RSS"
+        article = {
+            "title": title,
+            "url": link,
+            "domain": domain,
+            "language": "English",
+            "source_country": "",
+            "seen_date": pub_date,
+            "source_type": "Google News RSS",
+        }
+        article["relevance"] = article_relevance(article, country, region)
+        articles.append(article)
+    return sorted(articles, key=lambda row: row["relevance"], reverse=True)
+
+
 def build_public_narrative(articles: list[dict[str, Any]]) -> dict[str, Any]:
     if not articles:
         return {
@@ -294,12 +332,13 @@ def build_public_narrative(articles: list[dict[str, Any]]) -> dict[str, Any]:
         if any(keyword in title_text for keyword in keywords)
     ]
     domains = sorted({article["domain"] for article in articles if article["domain"]})
+    source_types = sorted({article.get("source_type", "GDELT Doc API") for article in articles})
     confidence = min(0.9, 0.35 + len(articles) * 0.04 + len(domains) * 0.025)
     confidence = round(confidence, 2)
     top_titles = titles[:5]
 
     return {
-        "source": "GDELT Doc API",
+        "source": " + ".join(source_types),
         "articles_found": len(articles),
         "distinct_domains": len(domains),
         "top_sources": domains[:8],
@@ -326,6 +365,7 @@ def demo_news_fallback(country: str, area_name: str, event: dict[str, Any]) -> l
             "source_country": country,
             "seen_date": event_day,
             "relevance": 0.75,
+            "source_type": "Demo fallback",
             "is_demo_fallback": True,
         },
         {
@@ -336,6 +376,7 @@ def demo_news_fallback(country: str, area_name: str, event: dict[str, Any]) -> l
             "source_country": country,
             "seen_date": event_day,
             "relevance": 0.68,
+            "source_type": "Demo fallback",
             "is_demo_fallback": True,
         },
         {
@@ -346,6 +387,7 @@ def demo_news_fallback(country: str, area_name: str, event: dict[str, Any]) -> l
             "source_country": country,
             "seen_date": event_day,
             "relevance": 0.62,
+            "source_type": "Demo fallback",
             "is_demo_fallback": True,
         },
     ]
@@ -469,6 +511,8 @@ with st.sidebar:
     )
     attach_gdelt = st.checkbox("Enable GDELT/news evidence", value=False)
     gdelt_max_records = st.slider("Max GDELT articles", min_value=5, max_value=50, value=10)
+    attach_google_news = st.checkbox("Enable Google News RSS evidence", value=True)
+    google_news_max_records = st.slider("Max Google News RSS articles", min_value=5, max_value=30, value=10)
     use_news_fallback = st.checkbox(
         "Use demo news fallback if GDELT is rate-limited",
         value=True,
@@ -584,15 +628,37 @@ gdelt_cache_key = (
     f"gdelt-v2|{country}|{area_name}|{selected_id}|{event['start']}|{event['end']}|"
     f"{gdelt_max_records}|fallback={use_news_fallback}"
 )
+google_news_cache_key = f"google-news-v1|{country}|{area_name}|{selected_id}|{google_news_max_records}"
 if "gdelt_results" not in st.session_state:
     st.session_state.gdelt_results = {}
+if "google_news_results" not in st.session_state:
+    st.session_state.google_news_results = {}
+
+if attach_gdelt or attach_google_news:
+    st.subheader("News Evidence")
+    st.caption("News sources are fetched only when you press a button, reducing rate-limit errors on Streamlit Cloud.")
+    if st.button("Clear cached news evidence"):
+        st.session_state.gdelt_results = {}
+        st.session_state.google_news_results = {}
+        st.info("Cleared cached news evidence for this session.")
+
+if attach_google_news:
+    if st.button("Fetch Google News RSS evidence for selected event"):
+        with st.spinner("Collecting Google News RSS evidence for the selected event..."):
+            try:
+                google_articles = fetch_google_news_articles(country, area_name, google_news_max_records)
+                st.session_state.google_news_results[google_news_cache_key] = {"articles": google_articles, "error": ""}
+            except Exception as exc:
+                st.session_state.google_news_results[google_news_cache_key] = {"articles": [], "error": str(exc)}
+
+    cached_google_news = st.session_state.google_news_results.get(google_news_cache_key, {"articles": [], "error": ""})
+    google_articles = cached_google_news["articles"]
+    google_error = cached_google_news["error"]
+    articles.extend(google_articles)
+    if google_error:
+        gdelt_error = f"{gdelt_error} | Google News RSS retrieval failed: {google_error}".strip(" |")
 
 if attach_gdelt:
-    st.subheader("GDELT / News Evidence")
-    st.caption("GDELT is fetched only when you press the button, reducing HTTP 429 rate-limit errors on Streamlit Cloud.")
-    if st.button("Clear cached GDELT/news evidence"):
-        st.session_state.gdelt_results = {}
-        st.info("Cleared cached GDELT/news evidence for this session.")
     if st.button("Fetch GDELT/news evidence for selected event"):
         gdelt_start, gdelt_end = event_date_window(event)
         with st.spinner("Collecting GDELT/news evidence for the selected event..."):
@@ -604,8 +670,9 @@ if attach_gdelt:
                 st.session_state.gdelt_results[gdelt_cache_key] = {"articles": fallback_articles, "error": str(exc)}
 
     cached_gdelt = st.session_state.gdelt_results.get(gdelt_cache_key, {"articles": [], "error": ""})
-    articles = cached_gdelt["articles"]
-    gdelt_error = cached_gdelt["error"]
+    articles.extend(cached_gdelt["articles"])
+    if cached_gdelt["error"]:
+        gdelt_error = f"{gdelt_error} | {cached_gdelt['error']}".strip(" |")
     if gdelt_error and use_news_fallback and not articles:
         articles = demo_news_fallback(country, area_name, event)
         st.session_state.gdelt_results[gdelt_cache_key] = {"articles": articles, "error": gdelt_error}
@@ -629,22 +696,26 @@ if gdelt_error:
         "GDELT could not be reached or returned an error during this run."
     ]
 
-if attach_gdelt:
+if attach_gdelt or attach_google_news:
     if articles:
         articles_df = pd.DataFrame(articles)
         if "is_demo_fallback" not in articles_df:
             articles_df["is_demo_fallback"] = False
+        if "source_type" not in articles_df:
+            articles_df["source_type"] = articles_df["domain"].apply(
+                lambda domain: "Demo fallback" if domain == "demo-fallback.local" else "GDELT Doc API"
+            )
         st.dataframe(
-            articles_df[["relevance", "seen_date", "domain", "language", "source_country", "is_demo_fallback", "title", "url"]],
+            articles_df[["source_type", "relevance", "seen_date", "domain", "language", "source_country", "is_demo_fallback", "title", "url"]],
             use_container_width=True,
             hide_index=True,
         )
         if any(article.get("is_demo_fallback") for article in articles):
             st.warning("Showing demo fallback rows because GDELT was rate-limited. These are not real news articles.")
     elif gdelt_error:
-        st.warning(f"GDELT retrieval failed: {gdelt_error}")
+        st.warning(f"News retrieval warning: {gdelt_error}")
     else:
-        st.info("No GDELT articles attached yet. Press the fetch button above to collect news evidence.")
+        st.info("No news articles attached yet. Press a fetch button above to collect news evidence.")
 
 missing_data = [
     "Copernicus/EFFIS context is not attached yet.",
@@ -676,7 +747,10 @@ memory_record = {
     "public_narrative": public_narrative,
     "evidence_sources": {
         "satellite": source_label,
-        "public_news": "GDELT Doc API" if attach_gdelt else "not requested",
+        "public_news": {
+            "gdelt": "GDELT Doc API" if attach_gdelt else "not requested",
+            "google_news_rss": "Google News RSS" if attach_google_news else "not requested",
+        },
         "official_context": "pending Copernicus/EFFIS connector",
         "llm_analysis": "pending RAG/LLM module",
     },
