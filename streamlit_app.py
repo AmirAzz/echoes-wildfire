@@ -533,7 +533,7 @@ def render_insight_items(items: list[Any], empty_text: str) -> None:
             st.markdown(f"- {item}")
 
 
-def compact_articles_for_llm(articles: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+def compact_articles_for_llm(articles: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
     compacted = []
     for article in articles[:limit]:
         compacted.append(
@@ -559,7 +559,8 @@ def build_gemini_prompt(memory_record: dict[str, Any], articles: list[dict[str, 
         "You are supporting a Horizon Europe wildfire preparedness prototype called ECHOES-Wildfire. "
         "Transform the provided satellite event record and news evidence into a structured digital memory. "
         "Use only the evidence provided. Do not invent casualties, causes, damage, or official decisions. "
-        "If evidence is weak or missing, say so explicitly. Return valid JSON only with this structure: "
+        "If evidence is weak or missing, say so explicitly. Keep every string under 160 characters. "
+        "Use short factual phrases, not paragraphs. Return valid JSON only with this structure: "
         "{"
         '"executive_summary": string, '
         '"event_timeline": [{"time": string, "claim": string, "source_basis": string, "confidence": "low|medium|high"}], '
@@ -687,6 +688,94 @@ def gemini_response_schema() -> dict[str, Any]:
     }
 
 
+def fallback_memory_analysis(
+    memory_record: dict[str, Any],
+    articles: list[dict[str, Any]],
+    model: str,
+    reason: str,
+    response_preview: str = "",
+) -> dict[str, Any]:
+    event = memory_record["event"]
+    satellite = memory_record["satellite_evidence"]
+    narrative = memory_record["public_narrative"]
+    top_titles = [article.get("title", "") for article in articles[:3] if article.get("title")]
+    source_note = "Satellite detections and news metadata only"
+    return {
+        "executive_summary": (
+            f"Candidate wildfire memory for {event['area_label']} based on "
+            f"{satellite['detections']} FIRMS detections and {len(articles)} news metadata rows."
+        ),
+        "event_timeline": [
+            {
+                "time": event["start"],
+                "claim": f"Clustered active-fire detections started near {event['region']}.",
+                "source_basis": satellite["source"],
+                "confidence": "medium",
+            },
+            {
+                "time": event["end"],
+                "claim": "Clustered detections ended within the selected event window.",
+                "source_basis": satellite["source"],
+                "confidence": "medium",
+            },
+        ],
+        "reported_impacts": [
+            {
+                "claim": impact,
+                "source_url": "",
+                "source_basis": "Preliminary keyword extraction from news titles",
+                "confidence": "low",
+                "requires_human_validation": True,
+            }
+            for impact in narrative.get("reported_impacts_preliminary", [])
+        ],
+        "response_actions": [],
+        "affected_or_vulnerable_groups": [],
+        "preparedness_gaps": [
+            {
+                "claim": "Official incident reports, perimeter data, and verified impacts are still missing.",
+                "source_basis": source_note,
+                "confidence": "high",
+            }
+        ],
+        "lessons_learned": [
+            {
+                "lesson": "Use satellite detections to trigger rapid evidence collection and human validation.",
+                "source_basis": source_note,
+                "confidence": "medium",
+            }
+        ],
+        "early_action_recommendations": [
+            {
+                "recommendation": "Validate the event with civil protection or official wildfire data.",
+                "reason": "FIRMS detects thermal anomalies, not confirmed wildfire perimeters.",
+                "confidence": "high",
+            },
+            {
+                "recommendation": "Collect full article text and official updates for cited impact extraction.",
+                "reason": "Current news evidence is mostly metadata and titles.",
+                "confidence": "high",
+            },
+        ],
+        "proposal_value": (
+            "Shows how ECHOES can convert public satellite and media signals into an auditable disaster memory."
+        ),
+        "validation_needs": [
+            "Official incident confirmation",
+            "Fire perimeter or burned-area layer",
+            "Verified impacts and response actions",
+            *top_titles[:2],
+        ],
+        "overall_confidence": "low" if not articles else "medium",
+        "method": "Gemini fallback after malformed model JSON",
+        "model": model,
+        "important_limitation": (
+            f"Gemini returned malformed JSON, so the app generated a conservative fallback. Reason: {reason}"
+        ),
+        "raw_gemini_preview": response_preview,
+    }
+
+
 def generate_gemini_memory_analysis(
     api_key: str,
     model: str,
@@ -697,7 +786,7 @@ def generate_gemini_memory_analysis(
         "contents": [{"parts": [{"text": build_gemini_prompt(memory_record, articles)}]}],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 3000,
+            "maxOutputTokens": 4500,
             "responseMimeType": "application/json",
             "responseSchema": gemini_response_schema(),
         },
@@ -743,10 +832,7 @@ def generate_gemini_memory_analysis(
         analysis = parse_json_response(response_text)
     except json.JSONDecodeError as exc:
         preview = response_text[:220].replace("\n", " ")
-        raise RuntimeError(
-            "Gemini returned malformed JSON. Press Clear cached Gemini analysis and try again, "
-            f"or lower Max Google News RSS articles. Response preview: {preview}"
-        ) from exc
+        return fallback_memory_analysis(memory_record, articles, selected_model, str(exc), preview)
     analysis["method"] = "Gemini API structured generation over NASA FIRMS and public news metadata"
     analysis["model"] = selected_model
     analysis["important_limitation"] = (
