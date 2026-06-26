@@ -23,6 +23,8 @@ GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL_FALLBACKS = ["gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]
 MAX_FIRMS_DAYS_PER_CALL = 5
 FIRMS_SOURCES = [
     "VIIRS_SNPP_SP",
@@ -194,9 +196,16 @@ def get_gemini_api_key() -> str:
 
 def get_gemini_model() -> str:
     try:
-        return str(st.secrets.get("GEMINI_MODEL", "") or "gemini-2.0-flash").strip()
+        return normalize_gemini_model(str(st.secrets.get("GEMINI_MODEL", "") or DEFAULT_GEMINI_MODEL))
     except Exception:
-        return "gemini-2.0-flash"
+        return DEFAULT_GEMINI_MODEL
+
+
+def normalize_gemini_model(model: str) -> str:
+    text = model.strip()
+    if text.startswith("models/"):
+        return text.removeprefix("models/")
+    return text
 
 
 @st.cache_data(ttl=86400)
@@ -595,33 +604,53 @@ def generate_gemini_memory_analysis(
     memory_record: dict[str, Any],
     articles: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    url = f"{GEMINI_GENERATE_URL.format(model=urllib.parse.quote(model))}?{urllib.parse.urlencode({'key': api_key})}"
     body = {
         "contents": [{"parts": [{"text": build_gemini_prompt(memory_record, articles)}]}],
         "generationConfig": {
             "temperature": 0.2,
             "maxOutputTokens": 1800,
-            "response_mime_type": "application/json",
+            "responseMimeType": "application/json",
         },
     }
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            response_payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"Gemini returned HTTP {exc.code}. {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Could not reach Gemini API: {exc.reason}") from exc
+
+    candidate_models = [normalize_gemini_model(model)]
+    for fallback in GEMINI_MODEL_FALLBACKS:
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
+
+    last_error = ""
+    selected_model = candidate_models[0]
+    response_payload: dict[str, Any] | None = None
+    for candidate_model in candidate_models:
+        url = (
+            f"{GEMINI_GENERATE_URL.format(model=urllib.parse.quote(candidate_model))}?"
+            f"{urllib.parse.urlencode({'key': api_key})}"
+        )
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                response_payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            selected_model = candidate_model
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            last_error = f"Gemini model {candidate_model} returned HTTP {exc.code}. {detail}"
+            if exc.code != 404:
+                raise RuntimeError(last_error) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Could not reach Gemini API: {exc.reason}") from exc
+
+    if response_payload is None:
+        raise RuntimeError(last_error or "Gemini did not return a usable response.")
 
     analysis = parse_json_response(extract_gemini_text(response_payload))
     analysis["method"] = "Gemini API structured generation over NASA FIRMS and public news metadata"
-    analysis["model"] = model
+    analysis["model"] = selected_model
     analysis["important_limitation"] = (
         "The model only sees satellite metadata and news titles/metadata, not full article text or official incident reports."
     )

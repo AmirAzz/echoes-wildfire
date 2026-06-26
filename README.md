@@ -33,7 +33,7 @@ GEMINI_API_KEY = "your_gemini_api_key_here"
 
 `FIRMS_MAP_KEY` is also accepted as a backwards-compatible alias.
 
-`GEMINI_MODEL` is optional. If it is not set, the app uses `gemini-2.0-flash`.
+`GEMINI_MODEL` is optional. If it is not set, the app uses `gemini-3.5-flash` and falls back to other Flash models if the selected model is unavailable.
 
 ## Current Workflow
 
