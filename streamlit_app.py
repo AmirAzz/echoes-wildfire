@@ -640,6 +640,108 @@ def render_insight_items(items: list[Any], empty_text: str) -> None:
             st.markdown(f"- {item}")
 
 
+def confidence_percent(value: str | int | float | None) -> int:
+    if isinstance(value, (int, float)):
+        return int(max(0, min(100, value)))
+    text = str(value or "").strip().lower()
+    if text == "high":
+        return 85
+    if text == "medium":
+        return 60
+    if text == "low":
+        return 30
+    return 45
+
+
+def confidence_color(value: str | int | float | None) -> str:
+    percent = confidence_percent(value)
+    if percent >= 75:
+        return "#16a34a"
+    if percent >= 50:
+        return "#d97706"
+    return "#dc2626"
+
+
+def insight_label(item: Any) -> str:
+    if isinstance(item, dict):
+        return (
+            item.get("claim")
+            or item.get("item")
+            or item.get("recommendation")
+            or item.get("lesson")
+            or item.get("time")
+            or str(item)
+        )
+    return str(item)
+
+
+def render_confidence_bar(label: str, value: str | int | float | None) -> None:
+    percent = confidence_percent(value)
+    color = confidence_color(value)
+    st.markdown(
+        f"""
+        <div style="margin: 0.35rem 0 0.75rem 0;">
+          <div style="display:flex; justify-content:space-between; font-size:0.85rem;">
+            <span>{html.escape(label)}</span><strong>{html.escape(str(value or 'unknown'))}</strong>
+          </div>
+          <div style="height:8px; background:#e5e7eb; border-radius:999px; overflow:hidden;">
+            <div style="height:8px; width:{percent}%; background:{color};"></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_insight_cards(title: str, items: list[Any], empty_text: str) -> None:
+    st.markdown(f"#### {title}")
+    if not items:
+        st.caption(empty_text)
+        return
+    cols = st.columns(min(3, max(1, len(items))))
+    for idx, item in enumerate(items):
+        with cols[idx % len(cols)]:
+            label = insight_label(item)
+            confidence = item.get("confidence", "unknown") if isinstance(item, dict) else "unknown"
+            source = ""
+            if isinstance(item, dict):
+                source = item.get("source_basis") or item.get("source_url") or item.get("reason") or ""
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e5e7eb; border-radius:8px; padding:0.85rem; min-height:150px; background:#ffffff;">
+                  <div style="font-weight:700; margin-bottom:0.4rem;">{html.escape(label)}</div>
+                  <div style="font-size:0.82rem; color:#6b7280; margin-bottom:0.55rem;">{html.escape(source[:180])}</div>
+                  <div style="font-size:0.78rem; color:#374151;">Confidence</div>
+                  <div style="height:7px; background:#e5e7eb; border-radius:999px; overflow:hidden;">
+                    <div style="height:7px; width:{confidence_percent(confidence)}%; background:{confidence_color(confidence)};"></div>
+                  </div>
+                  <div style="font-size:0.78rem; color:#6b7280; margin-top:0.35rem;">{html.escape(str(confidence))}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def render_ai_timeline(items: list[dict[str, Any]]) -> None:
+    st.markdown("#### Event Timeline")
+    if not items:
+        st.caption("No event timeline returned.")
+        return
+    for item in items[:6]:
+        time_text = item.get("time", "time unknown")
+        claim = item.get("claim", "")
+        confidence = item.get("confidence", "unknown")
+        st.markdown(
+            f"""
+            <div style="border-left:4px solid {confidence_color(confidence)}; padding:0.4rem 0 0.65rem 0.8rem; margin-left:0.2rem;">
+              <div style="font-size:0.82rem; color:#6b7280;">{html.escape(time_text)}</div>
+              <div style="font-weight:600;">{html.escape(claim)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def compact_articles_for_llm(articles: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
     compacted = []
     for article in articles[:limit]:
@@ -1112,34 +1214,75 @@ def render_memory_record(memory_record: dict[str, Any]) -> None:
         if not llm_analysis:
             st.info("Gemini analysis has not been generated yet. Use the button below the news evidence table.")
         else:
-            st.markdown("#### Executive summary")
-            st.write(llm_analysis.get("executive_summary", "No Gemini summary returned."))
-            st.markdown("#### Reported impacts")
-            render_insight_items(llm_analysis.get("reported_impacts", []), "No reported impacts extracted.")
-            st.markdown("#### Response actions")
-            render_insight_items(llm_analysis.get("response_actions", []), "No response actions extracted.")
-            st.markdown("#### Vulnerable or affected groups")
-            render_insight_items(
-                llm_analysis.get("affected_or_vulnerable_groups", []),
-                "No affected or vulnerable groups extracted.",
-            )
-            st.markdown("#### Preparedness gaps")
-            render_insight_items(llm_analysis.get("preparedness_gaps", []), "No preparedness gaps extracted.")
-            st.markdown("#### Lessons learned")
-            render_insight_items(llm_analysis.get("lessons_learned", []), "No lessons learned extracted.")
-            st.markdown("#### Early-action recommendations")
-            render_insight_items(
-                llm_analysis.get("early_action_recommendations", []),
-                "No early-action recommendations extracted.",
-            )
-            st.markdown("#### Proposal value")
-            st.write(llm_analysis.get("proposal_value", "No proposal value returned."))
-            st.markdown("#### Validation needs")
-            render_insight_items(llm_analysis.get("validation_needs", []), "No validation needs returned.")
-            st.caption(
-                f"Model: {llm_analysis.get('model', 'unknown')} | "
-                f"Overall confidence: {llm_analysis.get('overall_confidence', 'unknown')}"
-            )
+            st.markdown("#### AI Memory Board")
+            st.info(llm_analysis.get("executive_summary", "No Gemini summary returned."))
+
+            confidence_cols = st.columns(3)
+            with confidence_cols[0]:
+                render_confidence_bar("Narrative confidence", llm_analysis.get("overall_confidence", "unknown"))
+            with confidence_cols[1]:
+                render_confidence_bar("Event validation confidence", satellite["event_confidence_percent"])
+            with confidence_cols[2]:
+                operational_confidence = "medium" if narrative.get("articles_found", 0) else "low"
+                render_confidence_bar("Operational readiness", operational_confidence)
+
+            render_ai_timeline(llm_analysis.get("event_timeline", []))
+
+            impact_col, action_col = st.columns(2)
+            with impact_col:
+                render_insight_cards(
+                    "Reported Impacts",
+                    llm_analysis.get("reported_impacts", []),
+                    "No reported impacts extracted.",
+                )
+            with action_col:
+                render_insight_cards(
+                    "Response Actions",
+                    llm_analysis.get("response_actions", []),
+                    "No response actions extracted.",
+                )
+
+            group_col, gap_col = st.columns(2)
+            with group_col:
+                render_insight_cards(
+                    "Affected / Vulnerable Groups",
+                    llm_analysis.get("affected_or_vulnerable_groups", []),
+                    "No affected or vulnerable groups extracted.",
+                )
+            with gap_col:
+                render_insight_cards(
+                    "Preparedness Gaps",
+                    llm_analysis.get("preparedness_gaps", []),
+                    "No preparedness gaps extracted.",
+                )
+
+            lesson_col, early_action_col = st.columns(2)
+            with lesson_col:
+                render_insight_cards(
+                    "Lessons Learned",
+                    llm_analysis.get("lessons_learned", []),
+                    "No lessons learned extracted.",
+                )
+            with early_action_col:
+                render_insight_cards(
+                    "Early-Action Recommendations",
+                    llm_analysis.get("early_action_recommendations", []),
+                    "No early-action recommendations extracted.",
+                )
+
+            st.markdown("#### Proposal Value")
+            st.success(llm_analysis.get("proposal_value", "No proposal value returned."))
+            st.markdown("#### Validation Checklist")
+            validation_needs = llm_analysis.get("validation_needs", [])
+            if validation_needs:
+                validation_df = pd.DataFrame(
+                    [{"Status": "Pending", "Validation need": item} for item in validation_needs]
+                )
+                st.dataframe(validation_df, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No validation needs returned.")
+
+            st.caption(f"Model: {llm_analysis.get('model', 'unknown')}")
             if llm_analysis.get("post_processing_note"):
                 st.caption(llm_analysis["post_processing_note"])
             st.warning(llm_analysis.get("important_limitation", "AI output requires human validation."))
