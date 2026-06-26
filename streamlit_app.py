@@ -475,6 +475,113 @@ def cluster_events(detections: list[Detection], radius_km: float, max_gap_hours:
     return sorted(events, key=lambda item: (item["confidence_percent"], item["detections"]), reverse=True)
 
 
+def confidence_label(percent: float | int) -> str:
+    if percent >= 75:
+        return "High"
+    if percent >= 50:
+        return "Medium"
+    return "Low"
+
+
+def render_list(items: list[str], empty_text: str) -> None:
+    if items:
+        for item in items:
+            st.markdown(f"- {item}")
+    else:
+        st.caption(empty_text)
+
+
+def render_memory_record(memory_record: dict[str, Any]) -> None:
+    event_info = memory_record["event"]
+    satellite = memory_record["satellite_evidence"]
+    narrative = memory_record["public_narrative"]
+
+    st.subheader("Digital Wildfire Memory")
+    st.markdown(
+        f"**{memory_record['memory_id']}** documents a candidate wildfire event in "
+        f"**{event_info['area_label']}** from **{event_info['start']}** to **{event_info['end']}**."
+    )
+
+    if event_info["status"] == "possible thermal anomaly":
+        st.warning("This is a possible thermal anomaly, not a confirmed wildfire. Official or expert validation is required.")
+    elif "probable" in event_info["status"]:
+        st.info("This is a probable wildfire candidate based on clustered active-fire detections.")
+    else:
+        st.success("This is a higher-confidence wildfire candidate based on the current evidence.")
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Event status", event_info["status"])
+    metric_cols[1].metric("Satellite detections", satellite["detections"])
+    metric_cols[2].metric("Max FRP", satellite["max_frp"])
+    metric_cols[3].metric(
+        "Satellite confidence",
+        f"{satellite['event_confidence_percent']}%",
+        confidence_label(satellite["event_confidence_percent"]),
+    )
+
+    tab_summary, tab_evidence, tab_gaps, tab_raw = st.tabs(
+        ["Memory Summary", "Evidence", "Gaps & Limitations", "Raw Record"]
+    )
+
+    with tab_summary:
+        st.markdown("#### What the memory currently says")
+        st.write(
+            f"The system detected **{satellite['detections']}** active-fire observations near "
+            f"**{event_info['region']}**, clustered into event **{memory_record['memory_id']}**. "
+            f"The current event status is **{event_info['status']}**."
+        )
+        st.markdown("#### Public narrative")
+        st.write(narrative.get("summary", "No public narrative summary is available yet."))
+        if narrative.get("reported_impacts_preliminary"):
+            st.markdown("#### Preliminary reported impacts")
+            render_list(narrative["reported_impacts_preliminary"], "No impacts extracted yet.")
+        if narrative.get("top_article_titles"):
+            st.markdown("#### Top article titles")
+            render_list(narrative["top_article_titles"], "No article titles attached yet.")
+
+    with tab_evidence:
+        st.markdown("#### Satellite evidence")
+        st.table(
+            pd.DataFrame(
+                [
+                    {"Field": "Source", "Value": satellite["source"]},
+                    {"Field": "Evidence type", "Value": satellite["evidence_type"]},
+                    {"Field": "Detections", "Value": satellite["detections"]},
+                    {"Field": "Max FRP", "Value": satellite["max_frp"]},
+                    {"Field": "Confidence", "Value": f"{satellite['event_confidence_percent']}%"},
+                    {"Field": "Center", "Value": f"{event_info['center']['lat']}, {event_info['center']['lon']}"},
+                ]
+            )
+        )
+        st.markdown("#### News / public evidence")
+        st.table(
+            pd.DataFrame(
+                [
+                    {"Field": "Source", "Value": narrative.get("source", "not attached")},
+                    {"Field": "Articles found", "Value": narrative.get("articles_found", 0)},
+                    {"Field": "Distinct domains", "Value": narrative.get("distinct_domains", 0)},
+                    {"Field": "Narrative confidence", "Value": narrative.get("confidence", 0.0)},
+                    {"Field": "Status", "Value": narrative.get("status", "available")},
+                ]
+            )
+        )
+        if narrative.get("top_sources"):
+            st.markdown("#### Top sources")
+            render_list(narrative["top_sources"], "No sources attached yet.")
+
+    with tab_gaps:
+        st.markdown("#### Missing data")
+        render_list(memory_record.get("missing_data", []), "No missing-data notes.")
+        st.markdown("#### Satellite limitations")
+        render_list(satellite.get("limitations", []), "No satellite limitations listed.")
+        st.markdown("#### Public narrative limitations")
+        render_list(narrative.get("limitations", []), "No public narrative limitations listed.")
+
+    with tab_raw:
+        st.caption("Machine-readable structured memory record for debugging, export, and future LLM/RAG modules.")
+        st.json(memory_record)
+
+
 st.set_page_config(page_title="ECHOES-Wildfire", layout="wide")
 st.title("ECHOES-Wildfire")
 st.caption("AI-ready wildfire digital memory prototype using NASA FIRMS active-fire detections.")
@@ -757,8 +864,7 @@ memory_record = {
     "missing_data": missing_data,
 }
 
-st.subheader("Digital Memory Preview")
-st.json(memory_record)
+render_memory_record(memory_record)
 
 with st.expander("Data provenance and confidence method", expanded=True):
     st.write(f"Area: {area_label}")

@@ -40,7 +40,7 @@ NASA_FIRMS_MAP_KEY = "your_firms_map_key_here"
 4. The event builder clusters nearby detections in space and time.
 5. The UI shows event candidates with confidence, provenance, limitations, and a map view.
 6. Select an event and optionally fetch GDELT/news evidence for the event window.
-7. The digital memory preview combines satellite evidence with a preliminary public narrative.
+7. The digital memory report combines satellite evidence with a preliminary public narrative, while keeping the raw JSON record available for export/debugging.
 
 Note: GDELT can rate-limit public cloud apps with HTTP 429. The Streamlit UI therefore fetches GDELT only after pressing the dedicated fetch button.
 
